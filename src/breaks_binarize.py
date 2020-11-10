@@ -5,8 +5,9 @@ import pandas as pd
 import pyranges as pr
 import argparse
 import multiprocessing as mp
-import traceback
 from glob import glob
+from natsort import natsorted
+
 
 class Timeit():
     def __init__(self, name, display_on_enter=False, pad=0):
@@ -27,28 +28,29 @@ class Timeit():
             print(" " * self.pad + "{}: {:.3f}s".format(self.name, (time.time() - self.start)))
 
 
-def coverage(intervals, features, feature_name, fun=sum):
-    columns_return = ["gene_chrom", "bin_start", "bin_end", "gene_name", "gene_strand", "gene_start", "gene_end", "gene_region_start", "gene_region_end", "attributes", "attributes_details"]
-    columns_group = ["gene_chrom", "gene_strand", "gene_name", "gene_start", "gene_end", "gene_region_start", "gene_region_end", "bin_start", "bin_end"]
-    columns_preserve = list(set(columns_group + ["attributes", "attributes_details"]) & set(intervals.columns))
+def coverage(intervals, features, feature_name, fun=sum, details=True):
+    columns_attributes = ["attributes"] + (["attributes_details"] if details else [])
+    columns_group = ["bin_start", "bin_end", "bin_strand", "gene_chrom", "gene_name", "gene_strand", "gene_start", "gene_end", "gene_region_start", "gene_region_end"]
+    columns_return = columns_group + columns_attributes
+    columns_preserve = list(set(columns_return) & set(intervals.columns))
 
-    intervals_pr = pr.from_dict({**{'Chromosome': intervals["gene_chrom"], 'Start': intervals["bin_start"]-1, 'End': intervals["bin_end"]+1, 'Strand': intervals["gene_strand"]}, **intervals})
+    intervals_pr = pr.from_dict({**{'Chromosome': intervals["gene_chrom"], 'Start': intervals["bin_start"]-1, 'End': intervals["bin_end"]+1, 'Strand': intervals["bin_strand"]}, **intervals})
     features_pr = pr.from_dict({**{'Chromosome': features["feature_chrom"], 'Start': features["feature_start"], 'End': features["feature_end"], 'Strand': features["feature_strand"], 'feature_name': features["feature_name"]}, **features})
 
     overlaps = intervals_pr.join(features_pr, how=False, strandedness="same").as_df()
     overlaps["hit"] = True
     coverage = overlaps.groupby(columns_group, as_index=False).aggregate({'hit': fun})
-    coverage_details = overlaps.\
-        drop_duplicates(columns_group + ["feature_name" ,"hit"]).\
-        groupby(columns_group, as_index=False).\
-        agg({'feature_name': ','.join})
 
     results = intervals[columns_preserve].merge(coverage, how="left", on=columns_group)
-    results = results.merge(coverage_details, how="left", on=columns_group)
-
-    results["attributes_details"] = results["attributes"] + "; " + feature_name + "=" + results["feature_name"].fillna("") \
-        if "attributes_details" in results \
-        else feature_name + "=" + results["feature_name"].fillna("")
+    if details:
+        coverage_details = overlaps.\
+            drop_duplicates(columns_group + ["feature_name", "hit"]).\
+            groupby(columns_group, as_index=False).\
+            agg({'feature_name': ','.join})
+        results = results.merge(coverage_details, how="left", on=columns_group)
+        results["attributes_details"] = results["attributes"] + "; " + feature_name + "=" + results["feature_name"].fillna("") \
+            if "attributes_details" in results \
+            else feature_name + "=" + results["feature_name"].fillna("")
 
     results["attributes"] = results["attributes"] + "; " + feature_name + "=" + results["hit"].fillna(0).astype(str) \
         if "attributes" in results \
@@ -69,6 +71,7 @@ def make_windows(annotations, window_size, step):
     annotations_bin = {k: [] for k in annotations_bin_keys}
     annotations_bin["bin_start"] = []
     annotations_bin["bin_end"] = []
+    annotations_bin["bin_strand"] = []
     for r, row in annotations.iterrows():
         numOfChunks = int((row["gene_region_end"] - row["gene_region_start"] - window_size) / step) + 1
         bins = list(range(0, numOfChunks * step, step))
@@ -76,14 +79,15 @@ def make_windows(annotations, window_size, step):
         # Original strand
         annotations_bin["bin_start"].extend([int(i+row["gene_region_start"]) for i in bins])
         annotations_bin["bin_end"].extend([int(i+window_size+row["gene_region_start"]) for i in bins])
+        annotations_bin["bin_strand"].extend([row["gene_strand"]]*len(bins))
         for k in annotations_bin_keys:
             annotations_bin[k].extend([row[k]]*len(bins))
 
         # Reverse strand
         annotations_bin["bin_start"].extend([int(i + row["gene_region_start"]) for i in bins])
         annotations_bin["bin_end"].extend([int(i + window_size + row["gene_region_start"]) for i in bins])
-        annotations_bin["gene_strand"].extend(["-" if row["gene_strand"] == "+" else "+"]*len(bins))
-        for k in (annotations_bin_keys-{"gene_strand"}):
+        annotations_bin["bin_strand"].extend(["-" if row["gene_strand"] == "+" else "+"]*len(bins))
+        for k in annotations_bin_keys:
             annotations_bin[k].extend([row[k]]*len(bins))
 
     return pd.DataFrame.from_dict(annotations_bin)
@@ -148,13 +152,10 @@ def write_aggregated_output(processed, output_path):
     :param output_path: Output path
     :return: Nothing
     """
-    if not os.path.exists(args.output_dir):
-        os.makedirs(args.output_dir)
-
     processed.to_csv(output_path, index=False, sep="\t")
 
 
-def process_breaks_table(annotations_bin, breaks, additional_features_paths):
+def process_breaks_table(annotations_bin, breaks, details=False, additional_features_paths=[]):
     """
     Process a single breaks table
 
@@ -164,7 +165,7 @@ def process_breaks_table(annotations_bin, breaks, additional_features_paths):
     :return: Processed annotations
     """
     # Calculate breaks coverage over genome annotation (GFF)
-    processed = coverage(intervals=annotations_bin, features=breaks, feature_name="breaks")
+    processed = coverage(intervals=annotations_bin, features=breaks, feature_name="breaks", details=details)
 
     # Process additional annotations
     for f in additional_features_paths:
@@ -173,13 +174,16 @@ def process_breaks_table(annotations_bin, breaks, additional_features_paths):
     return processed
 
 
-def _collect_results(results):
-    write_aggregated_output(results[0], results[1])
-
-
-def _call_process_breaks_table(annotations_bin, breaks, additional_features_paths, output_path):
+def _call_process_breaks_table(annotations_bin, breaks, details, additional_features_paths, output_path):
     with Timeit(os.path.basename(output_path), pad=2):
-        return process_breaks_table(annotations_bin=annotations_bin, breaks=breaks, additional_features_paths=additional_features_paths), output_path
+        processed = process_breaks_table(annotations_bin=annotations_bin, breaks=breaks, details=details, additional_features_paths=additional_features_paths)
+        write_aggregated_output(processed, output_path)
+
+
+def _handle_error(error):
+    pass
+    # print(error)
+    # raise error
 
 
 def main(args):
@@ -197,8 +201,9 @@ def main(args):
     with Timeit('splitting gene regions to intervals', display_on_enter=True):
         annotations_bin = make_windows(annotations, args.window_size, args.window_step)
 
-    multiple_breaks_bed_paths = [path for input_glob in args.inputs for path in glob(input_glob)]
+    multiple_breaks_bed_paths = natsorted([path for input_glob in args.inputs for path in glob(input_glob)])
     threads = min([args.threads, len(multiple_breaks_bed_paths)])
+    async_results = []
     with Timeit('calculating coverage for {n} breaks files using {threads} threads'.format(n=len(multiple_breaks_bed_paths), threads=threads), display_on_enter=True):
         pool = mp.Pool(threads)
         for breaks_bed_path in multiple_breaks_bed_paths:
@@ -212,14 +217,25 @@ def main(args):
                 output_name = re.sub(pattern, repl, os.path.basename(breaks_bed_path)) + ".tsv"
             output_path = os.path.join(args.output_dir, output_name)
 
+            # create output directory
+            output_dir = os.path.dirname(output_path)
+            if not os.path.exists(output_dir):
+                os.makedirs(output_dir)
+                print("Created {} folder".format(output_dir))
+
             # Create an asynchronous process for calculating coverage
-            pool.apply_async(_call_process_breaks_table, kwds={
-                    'annotations_bin': annotations_bin,
-                    'breaks': breaks,
-                    'additional_features_paths': args.additional_features_paths,
-                    'output_path': output_path}, callback=_collect_results)
+            r = pool.apply_async(_call_process_breaks_table, kwds={
+                'annotations_bin': annotations_bin,
+                'breaks': breaks,
+                'details': args.details,
+                'additional_features_paths': args.additional_features_paths,
+                'output_path': output_path}, error_callback=_handle_error)
+            async_results.append(r)
         pool.close()
         pool.join()
+
+        for r in async_results:
+            r.get()
 
 
 
@@ -233,7 +249,8 @@ if __name__ == "__main__":
     parser.add_argument('-s|--window-step', dest="window_step", default=int(1e4), type=int, help='Step after each window')
     parser.add_argument('-e|--extend-gene', dest="extend", default=0, type=int, help='Extend each gene both directions by number of base pairs')
     parser.add_argument('-f|--features', dest="additional_features_paths", action="append", default=[], nargs="*", help='Additional features to annotate input file (need to provide additional -f flag with each feature)')
-    parser.add_argument('--threads', dest="threads", default=mp.cpu_count(), type=int, help='Number of threads used to calculate coverage'.format(mp.cpu_count()))
+    parser.add_argument('--details', dest="details", action='store_true', help='Preserve details like break names in the output file (default: no)')
+    parser.add_argument('--threads', dest="threads", default=mp.cpu_count(), type=int, help='Number of threads used to calculate coverage (default: {})'.format(mp.cpu_count()))
     args = parser.parse_args()
 
     main(args)
