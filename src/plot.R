@@ -5,6 +5,10 @@ library(reshape2)
 library(ggrepel)
 library(readr)
 
+Sys.setenv("plotly_username" = "sandrejev")
+Sys.setenv("plotly_api_key" = "AxuixdXZeEivct7XGi2g")
+
+
 #
 # Thresholds
 #
@@ -15,43 +19,81 @@ th.ccf_correlation = 0.5
 th.min_bin_breaks = 5
 
 
-breaksites = readr::read_tsv("data/breaksites.tsv")
+# TODO: why there is no Y chromosome. 
+# TODO: Is it true that in results chrXM => chrY and chrXF => chrX
+breaksites = readr::read_tsv("data/breaksites.tsv") %>%
+  dplyr::mutate(breaksite_full=paste0(breaksite_bait, breaksite_priming_direction))
 
 #
 # Read result files
 #
+results_chr_map = c("chrxf"="chrX", "chrxm"="chrY")
 results =  data.frame()
-for(results_path in list.files("results_new", full.names=T)) {
+for(results_path in list.files("results_parallel3/", full.names=T)) {
   writeLines(paste0("Reading file ", basename(results_path), "..."))
-  chr = gsub(".(tsv|bed)$", "", basename(results_path))
-  results.chr = readr::read_tsv(results_path)  %>%
-    dplyr::filter(gene_name!=".") %>%
-    tidyr::extract(attributes, into=c("breaks"), regex="breaks=([^;]+)") %>%
-    dplyr::mutate(breaksite_chrom=chr, gene_full=paste0(gene_chrom, ":", gene_name)) %>%
-    dplyr::mutate(gene_strand_name=ifelse(gene_strand=="+", "positive", "negative")) %>%
-    dplyr::mutate(gene_length=max(gene_end)-min(gene_start)) %>%
-    dplyr::mutate(breaks=as.numeric(breaks), breaks_sign=ifelse(gene_strand=="+", breaks, -breaks)) %>%
-    dplyr::group_by(breaksite_chrom, gene_full, gene_start, gene_end) %>% 
-    dplyr::mutate(breaks_max=max(breaks)) %>%
-    dplyr::filter(breaks_max>=th.min_bin_breaks) %>%
-    dplyr::group_by(gene_full, gene_start, gene_end, gene_strand) %>%
-    dplyr::mutate(peak_relative_loc=which.max(breaks)/n(), breaks_var=var(breaks)) %>%
-    dplyr::ungroup() %>%
-    dplyr::select(-attributes_details)
+  chr = tolower(gsub(".*(chr[^_]+)_.*", "\\1", basename(results_path), ignore.case=T))
+  chr = ifelse(chr %in% names(results_chr_map), results_chr_map[chr], chr)
+  results.chr = readr::read_tsv(results_path, col_types=cols(
+    bin_start = col_double(),
+    bin_end = col_double(),
+    bin_strand = col_character(),
+    gene_chrom = col_character(),
+    gene_name = col_character(),
+    gene_strand = col_character(),
+    gene_start = col_double(),
+    gene_end = col_double(),
+    gene_region_start = col_double(),
+    gene_region_end = col_double(),
+    attributes = col_character()
+  )) %>% dplyr::mutate(breaksite_chrom=chr)
   results = dplyr::bind_rows(results, results.chr)
 }
 
+results = results  %>%
+  dplyr::filter(gene_name!=".") %>%
+  tidyr::extract(attributes, into=c("breaks"), regex="breaks=([^;]+)") %>%
+  dplyr::mutate(gene_full=paste0(gene_chrom, ":", gene_name)) %>%
+  dplyr::mutate(gene_strand_name=ifelse(gene_strand=="+", "positive", "negative")) %>%
+  dplyr::mutate(breaks=as.numeric(breaks), breaks_sign=ifelse(gene_strand=="+", breaks, -breaks)) %>%
+  dplyr::group_by(breaksite_chrom, gene_full, gene_start, gene_end) %>% 
+  dplyr::mutate(gene_length=max(gene_end)-min(gene_start)) %>%
+  dplyr::mutate(breaks_max=max(breaks)) %>%
+  dplyr::filter(breaks_max>=th.min_bin_breaks)
 
-results %>%
+#
+# Display relation between distance to the breaksite and amount of breaks
+#
+results.dist_sum = results %>%
   dplyr::filter(breaksite_chrom==gene_chrom) %>%
-  dplyr::inner_join(breaksites, by="breaksite_chrom") %>%
-  dplyr::group_by(breaksite_chrom, gene_chrom, gene_full, gene_strand, gene_start, gene_end, gene_length) %>%
-  dplyr::summarise(breaks=sum(breaks), breaks_norm=breaks/gene_length[1], breaksite_dist=pmin(abs(gene_start[1]-breaksite_pos[1]), abs(gene_end[1]-breaksite_pos[1]))) %>%
-  ggplot(aes(x=log10(breaksite_dist), y=log10(breaks_norm))) +
-  geom_point(alpha=0.1) +
-  geom_smooth() +
-  facet_wrap(~breaksite_chrom)
+  dplyr::inner_join(breaksites, by=c("breaksite_chrom")) %>%
+  dplyr::group_by(breaksite_full, breaksite_bait, breaksite_priming_direction, gene_chrom, gene_name, gene_full, gene_strand, gene_start, gene_end, gene_length, bin_strand) %>%
+  dplyr::summarise(
+    breaks_max=max(breaks), breaks_max_norm=breaks_max/gene_length[1], 
+    breaks_sum=sum(breaks), breaks_sum_norm=breaks_sum/gene_length[1], 
+    breaksite_dist=pmin(abs(gene_start[1]-breaksite_pos[1]), abs(gene_end[1]-breaksite_pos[1])),
+    breaks_few=breaks_max<10) %>%
+  dplyr::group_by(breaksite_full, breaks_few, bin_strand, gene_strand) %>%
+  dplyr::do((function(z) {
+    zz<<-z
+    if(z$breaks_few[1]) {
+      z = z[sample(1:nrow(z), pmin(100, nrow(z))),]
+    }
+    z
+  })(.)) %>%
+  dplyr::mutate(strand_full=paste0("g", gene_strand, "/b", bin_strand)) %>%
+  dplyr::ungroup() %>%
+  dplyr::select(breaksite_full, gene_name, gene_length, breaks_max, breaksite_dist, strand_full)
 
+g = ggplot(results.dist_sum, aes(x=log10(breaksite_dist), y=log10(breaks_max), color=strand_full)) +
+  geom_point(aes(size=gene_length, gene_name=gene_name), alpha=0.3) +
+  # geom_hline(yintercept=th.breaks_many) + 
+  # ggrepel::geom_text_repel(aes(label=gene_name), data=. %>% dplyr::filter(breaks>th.breaks_many)) +
+  geom_smooth() +
+  facet_wrap(~breaksite_full, scale="free_y")
+ggplotly(g)
+p = plotly::ggplotly(g)
+htmlwidgets::saveWidget(plotly::as_widget(p), "index.html")
+# plotly::plotly_POST(g, "breaks2breaksite_dist", sharing="public")
 
 #
 # Calculate cross-correlation
