@@ -69,7 +69,7 @@ results.dist_sum = results %>%
   dplyr::group_by(breaksite_full, breaksite_bait, breaksite_priming_direction, gene_chrom, gene_name, gene_full, gene_strand, gene_start, gene_end, gene_length, bin_strand) %>%
   dplyr::summarise(
     breaks_max=max(breaks), breaks_max_norm=breaks_max/gene_length[1], 
-    breaks_sum=sum(breaks), breaks_sum_norm=breaks_sum/gene_length[1], 
+    breaks_sum=sum(breaks), breaks_sum_norm=breaks_sum/gene_length[1], breaks_sum_norm2=breaks_sum/(gene_region_end-gene_region_start)[1],
     breaksite_dist=pmin(abs(gene_start[1]-breaksite_pos[1]), abs(gene_end[1]-breaksite_pos[1])),
     breaks_few=breaks_max<10) %>%
   dplyr::group_by(breaksite_full, breaks_few, bin_strand, gene_strand) %>%
@@ -81,15 +81,15 @@ results.dist_sum = results %>%
     z
   })(.)) %>%
   dplyr::mutate(strand_full=paste0("g", gene_strand, "/b", bin_strand)) %>%
-  dplyr::ungroup() %>%
-  dplyr::select(breaksite_full, gene_name, gene_length, breaks_max, breaksite_dist, strand_full)
+  dplyr::ungroup()
 
-g = ggplot(results.dist_sum, aes(x=log10(breaksite_dist), y=log10(breaks_max), color=strand_full)) +
-  geom_point(aes(size=gene_length, gene_name=gene_name), alpha=0.3) +
+g = ggplot(results.dist_sum, aes(x=gene_start, y=log10(breaks_sum_norm2), color=bin_strand)) + # log10(breaksite_dist)
+  geom_point(aes(size=gene_length, gene_name=gene_name, gene_start=gene_start, gene_end=gene_end), alpha=0.3) +
   # geom_hline(yintercept=th.breaks_many) + 
   # ggrepel::geom_text_repel(aes(label=gene_name), data=. %>% dplyr::filter(breaks>th.breaks_many)) +
   geom_smooth() +
   facet_wrap(~breaksite_full, scale="free_y")
+plotly::ggplotly(g)
 ggplotly(g)
 p = plotly::ggplotly(g)
 htmlwidgets::saveWidget(plotly::as_widget(p), "index.html")
