@@ -49,6 +49,13 @@ for(results_path in list.files("results_parallel3/", full.names=T)) {
   results = dplyr::bind_rows(results, results.chr)
 }
 
+# chr10:80408500-80972916
+
+results %>%
+  dplyr::filter(gene_chrom=="chr10" & dplyr::between(gene_start, 78900000, 81200000)) %>%
+  dplyr::distinct(gene_chrom, gene_start, gene_end)
+
+
 results = results  %>%
   dplyr::filter(gene_name!=".") %>%
   tidyr::extract(attributes, into=c("breaks"), regex="breaks=([^;]+)") %>%
@@ -58,7 +65,8 @@ results = results  %>%
   dplyr::group_by(breaksite_chrom, gene_full, gene_start, gene_end) %>% 
   dplyr::mutate(gene_length=max(gene_end)-min(gene_start)) %>%
   dplyr::mutate(breaks_max=max(breaks)) %>%
-  dplyr::filter(breaks_max>=th.min_bin_breaks)
+  dplyr::filter(breaks_max>=th.min_bin_breaks) %>%
+  dplyr::ungroup()
 
 #
 # Display relation between distance to the breaksite and amount of breaks
