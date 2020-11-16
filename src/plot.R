@@ -4,6 +4,8 @@ library(scales)
 library(reshape2)
 library(ggrepel)
 library(readr)
+library(tidyr)
+library(plotly)
 
 
 Sys.setenv("plotly_username" = "sandrejev")
@@ -30,7 +32,7 @@ breaksites = readr::read_tsv("data/breaksites.tsv") %>%
 #
 results_chr_map = c("chrxf"="chrX", "chrxm"="chrY")
 results =  data.frame()
-for(results_path in list.files("results_parallel3/", full.names=T)) {
+for(results_path in list.files("data/breaks_bin/", full.names=T)) {
   writeLines(paste0("Reading file ", basename(results_path), "..."))
   chr = tolower(gsub(".*(chr[^_]+)_.*", "\\1", basename(results_path), ignore.case=T))
   chr = ifelse(chr %in% names(results_chr_map), results_chr_map[chr], chr)
@@ -51,10 +53,6 @@ for(results_path in list.files("results_parallel3/", full.names=T)) {
 }
 
 # chr10:80408500-80972916
-
-results %>%
-  dplyr::filter(gene_chrom=="chr10" & dplyr::between(gene_start, 78900000, 81200000)) %>%
-  dplyr::distinct(gene_chrom, gene_start, gene_end)
 
 
 results = results  %>%
