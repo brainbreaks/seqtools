@@ -7,22 +7,37 @@ library(ggpmisc)
 library(SamSeq)
 library(biomaRt)
 library(stringi)
+library(stringr)
 library(ggplot2)
+library(Biostrings)
+library(BSgenome)
 
+Biostrings::readDNAStringSet("nm.fasta")
+subseq(s, start=c(1, 2, 3), end=c(3, 6, 5))
+
+getfasta = function(df, chrom_col, start_col, end_col, strand_col) {
+    df.plus = df[df[[strand_col]]=="+",]
+    files = c(input.plus=tempfile(), output.plus=tempfile(), input.minus=tempfile(), output.minus=tempfile())
+    writeLines(stringr::str_glue("{chr}:{start}-{end}", chr=df.plus[[chrom_col]], start=df.plus[[start_col]], end=df.plus[[end_col]]), con=files["input.plus"])
+    stringr::str_glue("samtools faidx data/mm9/mm9.fa -i -r {input} > {output}", input=files["input.plus"], output=files["output.plus"])
+
+    df.minus = df[df[[strand_col]]=="-",]
+
+    stringr::str_glue("{chr}:{start}-{end}", chr=df.minus[[chrom_col]], start=df.minus[[start_col]], end=df.minus[[end_col]])
+    writeLines(validated_offtargets.faidx %>% dplyr::filter(offtarget_strand=="+") %>% .$offtarget_faidx, con="tmp/offtargets_pos_plus.bed")
+
+
+}
 
 analyze.primers_in_mm9 = function() {
-  validated_offtargets = readr::read_tsv("data/offtargets.tsv") %>%
-    dplyr::mutate(offtarget_id=1:n())
-  validated_offtargets %>%
+  validated_offtargets = validated_offtargets %>%
     dplyr::mutate(
       offtarget_score=0,
       offtarget_start=ifelse(offtarget_strand=="+", offtarget_start, offtarget_start-3-1),
-      offtarget_end=ifelse(offtarget_strand=="+", offtarget_end+3+1, offtarget_end)) %>%
+      offtarget_end=ifelse(offtarget_strand=="+", offtarget_end+3+1, offtarget_end)
+    ) %>%
     dplyr::select(offtarget_chrom, offtarget_start, offtarget_end, offtarget_id, offtarget_score, offtarget_strand) %>%
-    readr::write_tsv(file=paste0("tmp/offtargets_pos.bed"), col_names=F)
-  system("bedtools getfasta -fi data/mm9/mm9.fa -bed tmp/offtargets_pos.bed -bedOut -s > tmp/offtargets_seq.bed")
-  validated_offtargets_sequences = readr::read_tsv("tmp/offtargets_seq.bed", col_names=c("offtarget_chrom", "offtarget_start", "offtarget_end", "offtarget_id", "offtarget_score", "offtarget_strand", "offtarget_and_pam_sequence")) %>%
-    dplyr::rowwise() %>%
+    dplyr::mutate(offtarget_sequence=as.character(Biostrings::getSeq(ref, with(validated_offtargets, GRanges(offtarget_chrom, IRanges(start=offtarget_start, end=offtarget_end), strand=offtarget_strand))))) %>%
     dplyr::mutate(
       offtarget_and_pam_sequence=toupper(offtarget_and_pam_sequence),
       offtarget_sequence2=substr(offtarget_and_pam_sequence, 1, nchar(offtarget_and_pam_sequence)-3),
@@ -30,6 +45,8 @@ analyze.primers_in_mm9 = function() {
       offtarget_has_pam=grepl("^[A-Z]GG$", toupper(offtarget_pam_sequence))
     ) %>%
     dplyr::select(offtarget_id, offtarget_and_pam_sequence, offtarget_sequence2, offtarget_pam_sequence, offtarget_has_pam)
+
+
   validated_offtargets = validated_offtargets %>%
     dplyr::inner_join(validated_offtargets_sequences, by="offtarget_id") %>%
     dplyr::group_by(bait_chrom) %>%
@@ -92,7 +109,8 @@ analyze.primers_in_mm9 = function() {
   }
   primers_alignments = primers_alignments %>%
     dplyr::distinct(primer_sequence_name, primer_alignment_chrom, primer_alignment_strand, primer_alignment_start, primer_alignment_end, .keep_all=T) %>%
-    dplyr::mutate(primer_alignment_id=paste0(primer_sequence_name, "_", 1:n()))
+    dplyr::mutate(primer_alignment_id=paste0(primer_sequence_name, "_", 1:n())) %>%
+    dplyr::filter(primer_alignment_id %in% c("Chr4_51Mb_plus_sgRNA_313442", "Chr6_70Mb_plus_sgRNA_3321"))
 
   # Extract sequences that were aligned to primers
   primers_alignments %>%
@@ -103,6 +121,10 @@ analyze.primers_in_mm9 = function() {
     dplyr::select(primer_alignment_chrom, primer_alignment_start, primer_alignment_end, primer_alignment_id, score, primer_alignment_strand) %>%
     readr::write_tsv(file=paste0("tmp/primers_alignments_pos.bed"), col_names=F)
   system("bedtools getfasta -fi data/mm9/mm9.fa -bed tmp/primers_alignments_pos.bed -bedOut -s > tmp/primers_alignments_seq.bed")
+
+  #x = primers_alignments %>%
+  #  dplyr::filter(primer_alignment_id %in% c("Chr4_51Mb_plus_sgRNA_313442", "Chr6_70Mb_plus_sgRNA_3321"))
+  #x$primer_alignment_end - x$primer_alignment_start
 
   primers_alignments_sequences = readr::read_tsv("tmp/primers_alignments_seq.bed", col_names=c("primer_alignment_chrom", "primer_alignment_start", "primer_alignment_end", "primer_alignment_id", "primer_alignment_score", "primer_alignment_strand", "primer_alignment_and_pam_sequence")) %>%
     dplyr::rowwise() %>%
@@ -137,6 +159,15 @@ analyze.primers_in_mm9 = function() {
   y = strsplit(toupper(primers_targets$primer_alignment_sequence),"")
   primers_targets$primer_alignment_mismatches_check = sapply(1:nrow(primers_targets), function(i) sum(x[[i]]!=y[[i]]))
   primers_targets$primer_alignment_mismatches = primers_targets$primer_alignment_mismatches_check
+
+  primers_targets %>%
+    dplyr::mutate(primer_alignment_sequence_len=nchar(primer_alignment_sequence)) %>%
+    dplyr::filter(primer_alignment_mismatches < 8 & primer_alignment_sequence_len!=20) %>%
+    dplyr::group_by(primer_alignment_sequence_len) %>%
+    dplyr::slice(1) %>%
+    dplyr::ungroup() %>%
+    View()
+  table(nchar(primers_targets$primer_alignment_sequence), nchar(primers_targets$primer_sequence), primers_targets$primer_alignment_strand)
 
   #primers_targets = primers_targets %>% dplyr::filter(primer_alignment_mismatches_check==primer_alignment_mismatches)
   primers_targets = primers_targets %>%
