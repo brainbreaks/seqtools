@@ -44,6 +44,17 @@ for(breaks_bed in list.files("data/breaks", pattern="*_APH_no10kb_Merge.bed", fu
 
     # Run enrichment detection on control
     writeLines(stringr::str_glue("Calculate enrichments for control: '{output}'...", output=output_control_enrichment))
+
+    parser.add_argument('inputs', nargs='+', help='Input .bed files with detected breaks. Can also be multiple files or a whildcard expression (e.g.: path/to/*.bed) ')
+    parser.add_argument('chromsizes', help='Chromosome sizes in tab separated format')
+    parser.add_argument('output_path', help='Path to folder where all information needed to import to UCSC genome browser will be stored')
+    parser.add_argument('--track-name', dest="track_name", help='Name of the UCSC track')
+    parser.add_argument('-w|--window-size', dest="window_size", default=int(1e5), type=int, help='Window at which to agregate breaks number')
+    parser.add_argument('-s|--window-step', dest="window_step", default=int(1e4), type=int, help='Step after each window')
+
+    cmd_binarize = stringr::str_glue("venv/bin/python3 src/breaks_bed2wig.py ")
+    system(cmd_binarize)
+
     cmd_enrichment_control = stringr::str_glue(
       "macs2 callpeak -t {input} -f BED -g mm --keep-dup all -n {output} --outdir {outdir} --nomodel --extsize 2000 -q 0.01 --llocal 10000000",
       input=breaks_control_bed, outdir=dirname(output_control_enrichment), output=basename(output_control_enrichment))
