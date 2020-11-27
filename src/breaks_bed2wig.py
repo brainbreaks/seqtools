@@ -9,16 +9,20 @@ import pandas as pd
 from glob import glob
 import os
 import re
-
-print(os.system("lsb_release -a"))
-exit()
+import subprocess
+import math
 
 def write_coverages_bigwig(coverages, chromsizes_df, bigwig_path, track_name=None):
     if track_name is None:
         track_name = os.path.basename(bigwig_path)
+
     wig_path = bigwig_path + ".wig"
-    coverages[coverages.Strand == "+"].to_bigwig(path=bigwig_path, chromosome_sizes=pr.PyRanges(chromsizes_df), value_col="Breaks")
-    os.system("bigWigToWig {bigwig} {wig}".format(bigwig=bigwig_path, wig=wig_path))
+    chrsizes_path = bigwig_path + ".sizes"
+    chromsizes_df[["Chromosome", "Size"]].to_csv(chrsizes_path, header=False, index=False, sep="\t")
+    coverages.to_bigwig(path=bigwig_path, chromosome_sizes=pr.PyRanges(chromsizes_df), value_col="Breaks")
+    # os.system("bigWigToWig {bigwig} {wig}".format(bigwig=bigwig_path, wig=wig_path))
+    print(chromsizes_df)
+    subprocess.run(["bigWigToWig", bigwig_path, wig_path], env=os.environ)
 
     with open(wig_path, 'r') as original: data = original.read()
     with open(wig_path, 'w') as modified:
@@ -26,7 +30,7 @@ def write_coverages_bigwig(coverages, chromsizes_df, bigwig_path, track_name=Non
             "track type=bigWig name=\"{name}\" description=\"This track represents joins to similar strand\" color=255,0,0\n".format(
                 name=track_name, url=os.path.basename(bigwig_path)) + data)
 
-    os.system("wig2bigWig {wig} {bigwig}".format(bigwig=bigwig_path, wig=wig_path))
+    subprocess.run(["wigToBigWig", wig_path, chrsizes_path, bigwig_path + ".1"], env=os.environ)
 
 def main(args):
     # Create template with sliding window
@@ -50,9 +54,10 @@ def main(args):
 
 
     # Count values in each window (per group)
-    for group in set(breaks_df.group):
+    for group in sorted(list(set(breaks_df.group))):
+        print("Processing {}".format(group))
         breaks_group_df = breaks_df.query("group==@group")
-        chromsizes_df = breaks_group_df.groupby(["group", "Chromosome"], as_index=False).agg({'Start': min, 'End': max})
+        chromsizes_df = breaks_group_df.groupby(["Chromosome"], as_index=False).agg({'Start': min, 'End': max})
 
         bin_chromosomes = {k: [] for k in ['Chromosome', 'Start', 'End']}
         bin_chromosomes["Strand"] = []
@@ -68,17 +73,27 @@ def main(args):
 
         coverage_chromosomes = bin_chromosomes.coverage(pr.PyRanges(breaks_group_df), strandedness="same", overlap_col="Breaks")
         coverage_chromosomes_df = coverage_chromosomes.as_df()
-        coverage_chromosomes_df.loc[(coverage_chromosomes_df["Strand"] == "-"), "Breaks"] = - \
-        coverage_chromosomes_df.loc[(coverage_chromosomes_df["Strand"] == "-"), "Breaks"]
+        coverage_chromosomes_df.loc[(coverage_chromosomes_df["Strand"] == "-"), "Breaks"] = -coverage_chromosomes_df.loc[(coverage_chromosomes_df["Strand"] == "-"), "Breaks"]
+        coverage_chromosomes_df["Start"] = coverage_chromosomes_df["Start"] + math.floor(args.window_size/2 - args.window_step*2)
+        coverage_chromosomes_df["End"] = coverage_chromosomes_df["Start"] + math.floor(args.window_size/2 - args.window_step)
         coverage_chromosomes = pr.PyRanges(coverage_chromosomes_df)
 
         if not os.path.exists(args.output_path):
             os.makedirs(args.output_path, exist_ok=True)
 
+        # coverage_chromosomes_df = breaks_group_df.copy()
+        # coverage_chromosomes_df["Start"] = coverage_chromosomes_df["Start"]-50
+        # coverage_chromosomes_df["End"] = coverage_chromosomes_df["End"]+50
+        # coverage_chromosomes_df["Breaks"] = 1
+        # coverage_chromosomes_df = coverage_chromosomes_df.sort_values(["Chromosome", "Strand", "Start", "End"], ignore_index=True)
+        # coverage_chromosomes = pr.PyRanges(coverage_chromosomes_df)
+
+        coverage_chromsizes_df = coverage_chromosomes_df.groupby(["Chromosome"], as_index=False).agg({'Start': min, 'End': max})
+        coverage_chromsizes_df["Size"] = coverage_chromsizes_df["End"]
         basename_bigwig_pos, basename_bigwig_neg = "{}_pos.bw".format(group), "{}_neg.bw".format(group)
         path_bigwig_pos, path_bigwig_neg = os.path.join(args.output_path, basename_bigwig_pos), os.path.join(args.output_path, basename_bigwig_neg)
-        write_coverages_bigwig(coverage_chromosomes[coverage_chromosomes.Strand == "+"], chromsizes_df, path_bigwig_pos, track_name="{}:+".format(group))
-        write_coverages_bigwig(coverage_chromosomes[coverage_chromosomes.Strand == "-"], chromsizes_df, path_bigwig_neg, track_name="{}:+".format(group))
+        write_coverages_bigwig(coverage_chromosomes[coverage_chromosomes.Strand == "+"], coverage_chromsizes_df, path_bigwig_pos, track_name="{}:+".format(group))
+        write_coverages_bigwig(coverage_chromosomes[coverage_chromosomes.Strand == "-"], coverage_chromsizes_df, path_bigwig_neg, track_name="{}:-".format(group))
 
         # with open(os.path.join(args.output_path, "{}_custom_tracks.txt".format(group)), 'w') as f:
         #     f.write("#\n# You need to manually replace url to positive and negative strand tracks and \n# add each custom track individually to UCSC genome browser\n#\n")
