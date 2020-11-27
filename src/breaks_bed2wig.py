@@ -5,11 +5,28 @@ import pysam
 import argparse
 import pyranges as pr
 import pandas as pd
-from src.functions import *
+# from src.functions import *
 from glob import glob
 import os
 import re
 
+print(os.system("lsb_release -a"))
+exit()
+
+def write_coverages_bigwig(coverages, chromsizes_df, bigwig_path, track_name=None):
+    if track_name is None:
+        track_name = os.path.basename(bigwig_path)
+    wig_path = bigwig_path + ".wig"
+    coverages[coverages.Strand == "+"].to_bigwig(path=bigwig_path, chromosome_sizes=pr.PyRanges(chromsizes_df), value_col="Breaks")
+    os.system("bigWigToWig {bigwig} {wig}".format(bigwig=bigwig_path, wig=wig_path))
+
+    with open(wig_path, 'r') as original: data = original.read()
+    with open(wig_path, 'w') as modified:
+        modified.write(
+            "track type=bigWig name=\"{name}\" description=\"This track represents joins to similar strand\" color=255,0,0\n".format(
+                name=track_name, url=os.path.basename(bigwig_path)) + data)
+
+    os.system("wig2bigWig {wig} {bigwig}".format(bigwig=bigwig_path, wig=wig_path))
 
 def main(args):
     # Create template with sliding window
@@ -49,8 +66,7 @@ def main(args):
             bin_chromosomes["Chromosome"].extend([row["Chromosome"]] * len(bins) * 2)
         bin_chromosomes = pr.from_dict(bin_chromosomes)
 
-        coverage_chromosomes = bin_chromosomes.coverage(pr.PyRanges(breaks_group_df), strandedness="same",
-                                                        overlap_col="Breaks")
+        coverage_chromosomes = bin_chromosomes.coverage(pr.PyRanges(breaks_group_df), strandedness="same", overlap_col="Breaks")
         coverage_chromosomes_df = coverage_chromosomes.as_df()
         coverage_chromosomes_df.loc[(coverage_chromosomes_df["Strand"] == "-"), "Breaks"] = - \
         coverage_chromosomes_df.loc[(coverage_chromosomes_df["Strand"] == "-"), "Breaks"]
@@ -59,20 +75,15 @@ def main(args):
         if not os.path.exists(args.output_path):
             os.makedirs(args.output_path, exist_ok=True)
 
-        basename_pos, basename_neg = "{}_pos.bw".format(group), "{}_neg.bw".format(group)
-        path_pos, path_neg = os.path.join(args.output_path, basename_pos), os.path.join(args.output_path, basename_neg)
+        basename_bigwig_pos, basename_bigwig_neg = "{}_pos.bw".format(group), "{}_neg.bw".format(group)
+        path_bigwig_pos, path_bigwig_neg = os.path.join(args.output_path, basename_bigwig_pos), os.path.join(args.output_path, basename_bigwig_neg)
+        write_coverages_bigwig(coverage_chromosomes[coverage_chromosomes.Strand == "+"], chromsizes_df, path_bigwig_pos, track_name="{}:+".format(group))
+        write_coverages_bigwig(coverage_chromosomes[coverage_chromosomes.Strand == "-"], chromsizes_df, path_bigwig_neg, track_name="{}:+".format(group))
 
-        coverage_chromosomes[coverage_chromosomes.Strand == "+"].to_bigwig(path=path_pos, chromosome_sizes=pr.PyRanges(chromsizes_df), value_col="Breaks")
-        with open(path_pos, 'r') as original: data = original.read()
-        with open(path_pos, 'w') as modified:
-            modified.write("track type=bigWig name=\"{name} (pos)\" description=\"This track represents joins to similar strand\" color=255,0,0\n".format(name="{}:{}".format(args.track_name, group), url=basename_pos) + data)
-
-        coverage_chromosomes[coverage_chromosomes.Strand == "-"].to_bigwig(path=path_neg, chromosome_sizes=pr.PyRanges(chromsizes_df), value_col="Breaks")
-
-        with open(os.path.join(args.output_path, "{}_custom_tracks.txt".format(group)), 'w') as f:
-            f.write("#\n# You need to manually replace url to positive and negative strand tracks and \n# add each custom track individually to UCSC genome browser\n#\n")
-            f.write("track type=bigWig name=\"{name} (pos)\" description=\"This track represents joins to similar strand\" color=255,0,0, bigDataUrl={url}".format(name="{}:{}".format(args.track_name, group), url=basename_pos) + "\n")
-            f.write("track type=bigWig name=\"{name} (neg)\" description=\"This track represents joins to opposite strand\" color=0,255,0, bigDataUrl={url}".format(name="{}:{}".format(args.track_name, group), url=basename_neg) + "\n")
+        # with open(os.path.join(args.output_path, "{}_custom_tracks.txt".format(group)), 'w') as f:
+        #     f.write("#\n# You need to manually replace url to positive and negative strand tracks and \n# add each custom track individually to UCSC genome browser\n#\n")
+        #     f.write("track type=bigWig name=\"{name} (pos)\" description=\"This track represents joins to similar strand\" color=255,0,0, bigDataUrl={url}".format(name="{}:{}".format(args.track_name, group), url=basename_pos) + "\n")
+        #     f.write("track type=bigWig name=\"{name} (neg)\" description=\"This track represents joins to opposite strand\" color=0,255,0, bigDataUrl={url}".format(name="{}:{}".format(args.track_name, group), url=basename_neg) + "\n")
 
 
 if __name__ == "__main__":
