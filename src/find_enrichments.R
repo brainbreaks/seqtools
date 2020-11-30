@@ -29,39 +29,120 @@ peaks_coltypes = cols(
   control_peak_name = col_character()
 )
 
+dir.create("data/epic2", recursive=T, showWarnings=F)
+dir.create("data/sicer2", recursive=T, showWarnings=F)
+
 results = data.frame()
 for(breaks_bed in list.files("data/breaks", pattern="*_APH_no10kb_Merge.bed", full.names=T)) {
     bait_chrom = gsub("(chr)([^_]+).*$", "\\L\\1\\2", basename(breaks_bed), perl=T, ignore.case=T)
     breaks_control_bed = gsub("_APH_no10kb_Merge.bed", "_DMSO.bed", breaks_bed)
     breaks_filtered_bed = paste0("tmp/", basename(gsub("\\.bed$", "_filtered.bed", breaks_bed)))
+    breaks_control_filtered_bed = paste0("tmp/", basename(gsub("\\.bed$", "_filtered.bed", breaks_control_bed)))
+    output_control_bed = stringr::str_glue("data/epic2/{chrom}_both", chrom=bait_chrom)
     writeLines(stringr::str_glue("Processing {bait}...", bait=bait_chrom))
     if(!file.exists(breaks_control_bed)) {
         writeLines("Control doesn't exist. Skipping...")
         next()
     }
 
+    bed_cols = cols(chr=col_character(), start=col_double(), end=col_double(), name=col_character(), score=col_character(), strand=col_character())
+
+    readr::read_tsv(breaks_control_bed, col_names=names(bed_cols$cols), col_types=bed_cols) %>%
+      dplyr::mutate(start=ifelse(strand=="-", start-20, start), end=ifelse(strand=="+", end+20, end), score=1) %>%
+      readr::write_tsv(file=breaks_control_filtered_bed, col_names=F)
+
+    readr::read_tsv(breaks_bed, col_names=names(bed_cols$cols), col_types=bed_cols) %>%
+      dplyr::mutate(start=ifelse(strand=="-", start-20, start), end=ifelse(strand=="+", end+20, end), score=1) %>%
+      readr::write_tsv(file=breaks_filtered_bed, col_names=F)
+
     output_control_enrichment = paste0(tempdir, "/", bait_chrom, "_control")
 
     # Run enrichment detection on control
     writeLines(stringr::str_glue("Calculate enrichments for control: '{output}'...", output=output_control_enrichment))
 
-    parser.add_argument('inputs', nargs='+', help='Input .bed files with detected breaks. Can also be multiple files or a whildcard expression (e.g.: path/to/*.bed) ')
-    parser.add_argument('chromsizes', help='Chromosome sizes in tab separated format')
-    parser.add_argument('output_path', help='Path to folder where all information needed to import to UCSC genome browser will be stored')
-    parser.add_argument('--track-name', dest="track_name", help='Name of the UCSC track')
-    parser.add_argument('-w|--window-size', dest="window_size", default=int(1e5), type=int, help='Window at which to agregate breaks number')
-    parser.add_argument('-s|--window-step', dest="window_step", default=int(1e4), type=int, help='Step after each window')
+    #Species=mm9, redundancy threshold=5, window size=30000, fragment size=1, effective genome fraction=0.74, gap size=90000, E-value=0.1
+    system(stringr::str_glue("venv/bin/epic2 --genome mm9 --bin-size 30000 --fragment-size 1 --gaps-allowed 3 -t {input} -c {control} -o {output}", input=breaks_filtered_bed, control=breaks_control_filtered_bed, output=output_control_bed))
+    system(stringr::str_glue("venv/bin/epic2 --genome mm9 --bin-size 30000 --fragment-size 1 --gaps-allowed 3 -t {input} -o {output}", input=breaks_filtered_bed, output=output_control_bed))
+    system(stringr::str_glue("venv/bin/sicer -s mm9 --redundancy_threshold 5 --window_size 30000 --fragment_size 1 -egf 0.74 --gap_size 90000 --e_value 0.1 --cpu 24  -t {input} -c {control} -o {output_dir}", input=breaks_filtered_bed, control=breaks_control_filtered_bed, output_dir="data/sicer2"))
+    system(stringr::str_glue("venv/bin/sicer -s mm9 --redundancy_threshold 5 --window_size 30000 --fragment_size 1 -egf 0.74 --gap_size 90000 --e_value 0.1 --cpu 24  -t {input} -o {output_dir}", input=breaks_filtered_bed, output_dir="data/sicer2"))
 
-    cmd_binarize = stringr::str_glue("venv/bin/python3 src/breaks_bed2wig.py ")
-    system(cmd_binarize)
+    system(stringr::str_glue("venv/bin/recognicer -s mm9 --redundancy_threshold 5 --window_size 100 --fragment_size 1 -egf 0.74 --gap_size 100 --e_value 0.1 --cpu 24  -t {input} -o {output_dir}", input=breaks_filtered_bed, output_dir="data/sicer2"))
 
-    cmd_enrichment_control = stringr::str_glue(
-      "macs2 callpeak -t {input} -f BED -g mm --keep-dup all -n {output} --outdir {outdir} --nomodel --extsize 2000 -q 0.01 --llocal 10000000",
-      input=breaks_control_bed, outdir=dirname(output_control_enrichment), output=basename(output_control_enrichment))
-    system(cmd_enrichment_control)
-    control_enrichment_df = readr::read_tsv(paste0(output_control_enrichment, "_peaks.xls"), col_names=names(peaks_coltypes$cols), comment="#", skip=22, col_types=peaks_coltypes) %>%
-      dplyr::mutate(bait_chrom=bait_chrom)
-    results = dplyr::bind_rows(results, control_enrichment_df)
+
+    # Species=mm9, redundancy threshold=5, window size=30000, fragment size=1, effective genome fraction=0.74, gap size=90000, FDR=0.01
+    system(stringr::str_glue("sh SICER1.1/SICER/SICER.sh {input_dir} {input} {control} {output_dir} {genome} {r_threshold} {window_size} {fragment_size} {fraction} {gap_size} {fdr}",
+                             input_dir=dirname(breaks_filtered_bed),
+                             input=basename(breaks_filtered_bed),
+                             control=basename(breaks_control_filtered_bed),
+                             output_dir="data/sicer1",
+                             genome="mm9",
+                             fraction=0.74,
+                             r_threshold=5,
+                             window_size=30000,
+                             fragment_size=1,
+                             gap_size=90000,
+                             fdr=0.01
+    ))
+
+    system("rm data/sicer1/*")
+
+    # ORIGINAL FROM WEI
+    system(stringr::str_glue("sh SICER1.1/SICER/SICER-rb.sh {input_dir} {input} {output_dir} {genome} {r_threshold} {window_size} {fragment_size} {fraction} {gap_size} {e_value}",
+                     input_dir=dirname(breaks_filtered_bed),
+                     input=basename(breaks_control_filtered_bed),
+                     output_dir="data/sicer1",
+                     genome="mm9",
+                     fraction=0.74,
+                     r_threshold=5,
+                     window_size=30000,
+                     fragment_size=1,
+                     gap_size=90000,
+                     e_value=0.1
+    ))
+
+    # Working for Chrom3 and Chrom1 (but needs tuning everytime)
+    system(stringr::str_glue("sh SICER1.1/SICER/SICER-rb.sh {input_dir} {input} {output_dir} {genome} {format(r_threshold, scientific=F)} {format(window_size, scientific=F)} {fragment_size} {fraction} {format(gap_size, scientific=F)} {format(e_value, scientific=F)}",
+                     input_dir=dirname(breaks_filtered_bed),
+                     input=basename(breaks_control_filtered_bed),
+                     output_dir="data/sicer1",
+                     genome="mm9",
+                     fraction=0.74,
+                     r_threshold=100000,
+                     window_size=1000,
+                     fragment_size=20,
+                     gap_size=3000,
+                     e_value=1e-15
+    ))
+
+
+    # Equivalent with SICER2, but e-value in sicer 2 has to be integer (BUG!)
+    system(stringr::str_glue("venv/bin/sicer -s mm9 --redundancy_threshold 100000 --window_size 1000 --fragment_size 20 -egf 0.74 --gap_size 3000 --e_value 1 --cpu 24  -t {input} -o {output_dir}", input=breaks_control_filtered_bed, output_dir="data/sicer2"))
+    system(stringr::str_glue("sh SICER1.1/SICER/SICER-rb.sh {input_dir} {input} {output_dir} {genome} {format(r_threshold, scientific=F)} {format(window_size, scientific=F)} {fragment_size} {fraction} {format(gap_size, scientific=F)} {format(e_value, scientific=F)}",
+                     input_dir=dirname(breaks_filtered_bed),
+                     input=basename(breaks_control_filtered_bed),
+                     output_dir="data/sicer1",
+                     genome="mm9",
+                     fraction=0.74,
+                     r_threshold=100000,
+                     window_size=1000,
+                     fragment_size=20,
+                     gap_size=3000,
+                     e_value=1
+    ))
+
+    system(stringr::str_glue("venv/bin/epic2 --genome mm9 --bin-size 10000 -kd --fragment-size 20 --gaps-allowed 3 -e 1 -t {input} -o {output}", input=breaks_control_filtered_bed, output=output_control_bed))
+
+
+    print("")
+
+
+    #cmd_enrichment_control = stringr::str_glue(
+    #  "macs2 callpeak -t {input} -f BED -g mm --keep-dup all -n {output} --outdir {outdir} --nomodel --extsize 2000 -q 0.01 --llocal 10000000",
+    #  input=breaks_control_bed, outdir=dirname(output_control_enrichment), output=basename(output_control_enrichment))
+    #system(cmd_enrichment_control)
+    #control_enrichment_df = readr::read_tsv(paste0(output_control_enrichment, "_peaks.xls"), col_names=names(peaks_coltypes$cols), comment="#", skip=22, col_types=peaks_coltypes) %>%
+    #  dplyr::mutate(bait_chrom=bait_chrom)
+    #results = dplyr::bind_rows(results, control_enrichment_df)
     #
     #
     # macs2_input_df = readr::read_tsv(macs2_input, col_names=macs2_cols) %>%

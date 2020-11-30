@@ -74,8 +74,8 @@ def main(args):
         coverage_chromosomes = bin_chromosomes.coverage(pr.PyRanges(breaks_group_df), strandedness="same", overlap_col="Breaks")
         coverage_chromosomes_df = coverage_chromosomes.as_df()
         coverage_chromosomes_df.loc[(coverage_chromosomes_df["Strand"] == "-"), "Breaks"] = -coverage_chromosomes_df.loc[(coverage_chromosomes_df["Strand"] == "-"), "Breaks"]
-        coverage_chromosomes_df["Start"] = coverage_chromosomes_df["Start"] + math.floor(args.window_size/2 - args.window_step*2)
-        coverage_chromosomes_df["End"] = coverage_chromosomes_df["Start"] + math.floor(args.window_size/2 - args.window_step)
+        coverage_chromosomes_df["Start"] = coverage_chromosomes_df["Start"] - math.floor(args.window_size/2 + args.window_step/2)
+        coverage_chromosomes_df["End"] = coverage_chromosomes_df["Start"] - math.floor(args.window_size/2 - args.window_step/2)
         coverage_chromosomes = pr.PyRanges(coverage_chromosomes_df)
 
         if not os.path.exists(args.output_path):
