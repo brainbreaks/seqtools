@@ -11,54 +11,85 @@ import os
 import re
 import subprocess
 import math
+from sklearn.neighbors import KernelDensity
+from scipy.stats import norm
+import numpy as np
+from natsort import natsorted
+import matplotlib
+import tempfile
+import multiprocessing as mp
 
-def write_coverages_bigwig(coverages, chromsizes_df, bigwig_path, track_name=None):
-    if track_name is None:
-        track_name = os.path.basename(bigwig_path)
 
-    wig_path = bigwig_path + ".wig"
-    chrsizes_path = bigwig_path + ".sizes"
-    chromsizes_df[["Chromosome", "Size"]].to_csv(chrsizes_path, header=False, index=False, sep="\t")
-    coverages.to_bigwig(path=bigwig_path, chromosome_sizes=pr.PyRanges(chromsizes_df), value_col="Breaks")
-    # os.system("bigWigToWig {bigwig} {wig}".format(bigwig=bigwig_path, wig=wig_path))
-    print(chromsizes_df)
-    subprocess.run(["bigWigToWig", bigwig_path, wig_path], env=os.environ)
+def ranges_kde(breaks_df, chromsizes_df, binwidth=100, bandwidth=500, algorithm="epanechnikov"):
+    df = {"Start": [], "End": [], "Strand": [], "Chromosome": [], "Score": []}
+    for chr in natsorted(list(set(breaks_df.Chromosome))):
+        if not (chromsizes_df.Chromosome == chr).any():
+            print("No breaks on chromosome '{}'".format(chr))
+            continue
 
+        x_df = breaks_df.loc[breaks_df.Chromosome == chr]
+
+        if x_df.shape[0] < 10:
+            print("To few breaks on chromosome '{}' ({} < 10)".format(chr, x_df.shape[0]))
+            continue
+
+        csize = chromsizes_df.Size[chromsizes_df.Chromosome == chr].values[0]
+        bins = int(math.ceil(csize/binwidth))
+        x_df_starts = np.linspace(1, csize, bins).round()
+        x_df_model = KernelDensity(kernel=algorithm, bandwidth=bandwidth).fit(x_df["Start"].values[:, np.newaxis])
+        x_df_fit = np.exp(x_df_model.score_samples(x_df_starts[:-1, np.newaxis]))
+        df["Start"].extend([int(i) for i in x_df_starts[:-1]])
+        df["End"].extend([int(i) for i in x_df_starts[1:]])
+        df["Strand"].extend(["+"] * (len(x_df_starts) - 1))
+        df["Chromosome"].extend([chr] * (len(x_df_starts) - 1))
+        df["Score"].extend(x_df_fit * 1e8)
+
+    df_ranges = pr.from_dict(df)
+
+    return df_ranges
+
+def to_bigwig(data, bigwig_path, chromsizes_df, chromsizes_path, name, description="", color="0,0,255", altColor="255,0,0"):
+    bigwig_path1 = tempfile.NamedTemporaryFile(delete=False).name
+    wig_path = tempfile.NamedTemporaryFile(delete=False).name
+    # sizes_path = tempfile.NamedTemporaryFile(delete=False).name
+    # chromsizes_df[["Chromosome", "Size"]].to_csv(sizes_path, header=False, index=False, sep="\t")
+    data.to_bigwig(path=bigwig_path1, chromosome_sizes=pr.from_dict(chromsizes_df), value_col="Score", rpm=False)
+
+    subprocess.run(["bigWigToWig", bigwig_path1, wig_path], env=os.environ)
     with open(wig_path, 'r') as original: data = original.read()
     with open(wig_path, 'w') as modified:
         modified.write(
-            "track type=bigWig name=\"{name}\" description=\"This track represents joins to similar strand\" color=255,0,0\n".format(
-                name=track_name, url=os.path.basename(bigwig_path)) + data)
+            "track type=wiggle_0 name=\"{name}\" visibility=full description=\"This track represents joins to similar strand\" color={color} altColor={altColor}\n".format(
+                name=name, url=description, color=color, altColor=altColor) + data)
 
-    subprocess.run(["wigToBigWig", wig_path, chrsizes_path, bigwig_path + ".1"], env=os.environ)
+    subprocess.run(["wigToBigWig", wig_path, chromsizes_path, bigwig_path], env=os.environ)
 
-def main(args):
-    # Create template with sliding window
-    breaks_df = []
-    multiple_breaks_bed_paths = [path for input_glob in args.inputs for path in glob(input_glob)]
-    for path in multiple_breaks_bed_paths:
-        filename = os.path.basename(path)
-        bait_chrom = re.sub(".*(chr[^_]+)_.*", r"\1", filename, flags=re.IGNORECASE).lower()
-        breaks_i = pd.read_csv(path, sep="\t", header=0,
-                               names=["Chromosome", "Start", "End", "Feature", "Score", "Strand"])
-        breaks_i["bait_chrom"] = bait_chrom
-        breaks_i["filename"] = filename
-        breaks_i["group"] = filename
+def main_group(args, group, breaks_df):
+    sample = re.sub("\.bed", "", os.path.basename(group))
+    print("Processing {}".format(group))
+    breaks_group_df = breaks_df.query("group==@group")
+    breaks_group_pos_df = breaks_group_df.query("Strand=='+'").copy()
+    breaks_group_neg_df = breaks_group_df.query("Strand=='-'").copy()
+    chromsizes_df = pd.read_csv(args.chromsizes, sep="\t", header=None, names=["Chromosome", "Size"])
+    chromsizes_df["Start"] = 1
+    chromsizes_df["End"] = chromsizes_df["Size"]
+    # chromsizes_df = breaks_group_df.groupby(["Chromosome"], as_index=False).agg({'Start': min, 'End': max})
+    # chromsizes_df["Start"] = 1
+    # chromsizes_df["Size"] = chromsizes_df["End"] - chromsizes_df["Start"] + 1
 
-        if args.only_bait_chromosome:
-            breaks_i = breaks_i.query("Chromosome == bait_chrom")
-            breaks_i["group"] = "only_bait_chromosome"
-
-        breaks_df.append(breaks_i)
-    breaks_df = pd.concat(breaks_df)
-
-
-    # Count values in each window (per group)
-    for group in sorted(list(set(breaks_df.group))):
-        print("Processing {}".format(group))
-        breaks_group_df = breaks_df.query("group==@group")
-        chromsizes_df = breaks_group_df.groupby(["Chromosome"], as_index=False).agg({'Start': min, 'End': max})
-
+    if args.method == "kde":
+        breaks_kde_pos = ranges_kde(breaks_group_pos_df, chromsizes_df=chromsizes_df, binwidth=args.kde_binwidth,
+                                    bandwidth=args.kde_bandwidth, algorithm=args.kde_algorithm)
+        breaks_kde_neg = ranges_kde(breaks_group_neg_df, chromsizes_df=chromsizes_df, binwidth=args.kde_binwidth,
+                                    bandwidth=args.kde_bandwidth, algorithm=args.kde_algorithm)
+        kde_max = max([breaks_kde_pos.Score.max(), breaks_kde_neg.Score.max()])
+        breaks_kde_pos.Score = breaks_kde_pos.Score / kde_max
+        breaks_kde_neg.Score = -breaks_kde_neg.Score / kde_max
+        to_bigwig(breaks_kde_pos, os.path.join(args.output_path, sample + "_pos_kde.bw"), chromsizes_df,
+                  args.chromsizes, name="{} +".format(os.path.basename(group)))
+        to_bigwig(breaks_kde_neg, os.path.join(args.output_path, sample + "_neg_kde.bw"), chromsizes_df,
+                  args.chromsizes, name="{} -".format(os.path.basename(group)))
+    elif args.method == "window":
         bin_chromosomes = {k: [] for k in ['Chromosome', 'Start', 'End']}
         bin_chromosomes["Strand"] = []
         for r, row in chromsizes_df.iterrows():
@@ -71,48 +102,75 @@ def main(args):
             bin_chromosomes["Chromosome"].extend([row["Chromosome"]] * len(bins) * 2)
         bin_chromosomes = pr.from_dict(bin_chromosomes)
 
-        coverage_chromosomes = bin_chromosomes.coverage(pr.PyRanges(breaks_group_df), strandedness="same", overlap_col="Breaks")
+        coverage_chromosomes = bin_chromosomes.coverage(pr.PyRanges(breaks_group_df), strandedness="same",
+                                                        overlap_col="Score")
         coverage_chromosomes_df = coverage_chromosomes.as_df()
-        coverage_chromosomes_df.loc[(coverage_chromosomes_df["Strand"] == "-"), "Breaks"] = -coverage_chromosomes_df.loc[(coverage_chromosomes_df["Strand"] == "-"), "Breaks"]
-        coverage_chromosomes_df["Start"] = coverage_chromosomes_df["Start"] - math.floor(args.window_size/2 + args.window_step/2)
-        coverage_chromosomes_df["End"] = coverage_chromosomes_df["Start"] - math.floor(args.window_size/2 - args.window_step/2)
+        window_max = coverage_chromosomes_df.Score.max()
+        coverage_chromosomes_df.loc[(coverage_chromosomes_df["Strand"] == "-"), "Score"] = -coverage_chromosomes_df.loc[
+            (coverage_chromosomes_df["Strand"] == "-"), "Score"]
+        coverage_chromosomes_df["End"] = coverage_chromosomes_df["Start"] + math.floor(
+            (args.window_size + args.window_step) / 2) - 1
+        coverage_chromosomes_df["Start"] = coverage_chromosomes_df["Start"] + math.floor(
+            (args.window_size - args.window_step) / 2)
+        coverage_chromosomes_df["Score"] = coverage_chromosomes_df["Score"] / window_max
+
         coverage_chromosomes = pr.PyRanges(coverage_chromosomes_df)
+        to_bigwig(coverage_chromosomes[coverage_chromosomes.Strand == "+"],
+                  os.path.join(args.output_path, sample + "_pos_window.bw"), chromsizes_df=chromsizes_df,
+                  chromsizes_path=args.chromsizes, name=sample + " +")
+        to_bigwig(coverage_chromosomes[coverage_chromosomes.Strand == "-"],
+                  os.path.join(args.output_path, sample + "_neg_window.bw"), chromsizes_df=chromsizes_df,
+                  chromsizes_path=args.chromsizes, name=sample + " -")
+    else:
+        raise NotImplementedError("Unknown method {}".format(args.method))
 
-        if not os.path.exists(args.output_path):
-            os.makedirs(args.output_path, exist_ok=True)
+def main(args):
+    if not os.path.exists(args.output_path):
+        os.makedirs(args.output_path, exist_ok=True)
 
-        # coverage_chromosomes_df = breaks_group_df.copy()
-        # coverage_chromosomes_df["Start"] = coverage_chromosomes_df["Start"]-50
-        # coverage_chromosomes_df["End"] = coverage_chromosomes_df["End"]+50
-        # coverage_chromosomes_df["Breaks"] = 1
-        # coverage_chromosomes_df = coverage_chromosomes_df.sort_values(["Chromosome", "Strand", "Start", "End"], ignore_index=True)
-        # coverage_chromosomes = pr.PyRanges(coverage_chromosomes_df)
+    # Create template with sliding window
+    breaks_df = []
+    multiple_breaks_bed_paths = [path for input_glob in args.inputs for path in glob(input_glob)]
+    for path in multiple_breaks_bed_paths:
+        filename = os.path.basename(path)
+        bait_chrom = re.sub(".*(chr[^_]+)_.*", r"\1", filename, flags=re.IGNORECASE).lower()
+        breaks_i = pd.read_csv(path, sep="\t", header=0, names=["Chromosome", "Start", "End", "Feature", "Score", "Strand"])
+        breaks_i["bait_chrom"] = bait_chrom
+        breaks_i["filename"] = filename
+        breaks_i["group"] = path
 
-        coverage_chromsizes_df = coverage_chromosomes_df.groupby(["Chromosome"], as_index=False).agg({'Start': min, 'End': max})
-        coverage_chromsizes_df["Size"] = coverage_chromsizes_df["End"]
-        basename_bigwig_pos, basename_bigwig_neg = "{}_pos.bw".format(group), "{}_neg.bw".format(group)
-        path_bigwig_pos, path_bigwig_neg = os.path.join(args.output_path, basename_bigwig_pos), os.path.join(args.output_path, basename_bigwig_neg)
-        write_coverages_bigwig(coverage_chromosomes[coverage_chromosomes.Strand == "+"], coverage_chromsizes_df, path_bigwig_pos, track_name="{}:+".format(group))
-        write_coverages_bigwig(coverage_chromosomes[coverage_chromosomes.Strand == "-"], coverage_chromsizes_df, path_bigwig_neg, track_name="{}:-".format(group))
+        if args.only_bait_chromosome:
+            breaks_i = breaks_i.query("Chromosome == bait_chrom").copy()
+            breaks_i["group"] = "only_bait_chromosome"
 
-        # with open(os.path.join(args.output_path, "{}_custom_tracks.txt".format(group)), 'w') as f:
-        #     f.write("#\n# You need to manually replace url to positive and negative strand tracks and \n# add each custom track individually to UCSC genome browser\n#\n")
-        #     f.write("track type=bigWig name=\"{name} (pos)\" description=\"This track represents joins to similar strand\" color=255,0,0, bigDataUrl={url}".format(name="{}:{}".format(args.track_name, group), url=basename_pos) + "\n")
-        #     f.write("track type=bigWig name=\"{name} (neg)\" description=\"This track represents joins to opposite strand\" color=0,255,0, bigDataUrl={url}".format(name="{}:{}".format(args.track_name, group), url=basename_neg) + "\n")
+        breaks_df.append(breaks_i)
+    breaks_df = pd.concat(breaks_df)
+
+
+    # Count values in each window (per group)
+    groups = sorted(list(set(breaks_df.group)))
+    pool = mp.Pool(args.threads)
+    for group in groups:
+        pool.apply_async(main_group, kwds={'args': args, 'group': group, 'breaks_df': breaks_df})
+    pool.close()
+    pool.join()
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Use a sliding window to aggregate breaks in bed file')
-    parser.add_argument('inputs', nargs='+', help='Input .bed files with detected breaks. Can also be multiple files or a whildcard expression (e.g.: path/to/*.bed) ')
+    parser.add_argument('inputs', nargs='+', help='Input .bed files with detected breaks. Can also be multiple files or a whildcard expression (e.g.: path/to/*.bed)')
+    parser.add_argument('chromsizes', help='Path to chromsizes file')
     parser.add_argument('output_path', help='Path to folder where all information needed to import to UCSC genome browser will be stored')
-    parser.add_argument('--track-name', dest="track_name", help='Name of the UCSC track')
+    parser.add_argument("method", help="Can be either 'kde' (additional arguments --kde-bandwidth, --kde-bins, --kde-algorithm) or 'window' (additional arguments --sindow-size and --window-step)")
     parser.add_argument('--only-bait-chromosome', dest="only_bait_chromosome", action="store_true", help='Enabling this option will produce a WIG where only bait chromosome is present from each file. The bait chromosome is guessed from file name')
-    parser.add_argument('-w|--window-size', dest="window_size", default=int(1e5), type=int, help='Window at which to agregate breaks number')
-    parser.add_argument('-s|--window-step', dest="window_step", default=int(1e4), type=int, help='Step after each window')
+    parser.add_argument('--threads', dest="threads", default=1, type=int, help='Use multiple threads to process different files')
+    parser.add_argument('-w', '--window-size', dest="window_size", default=int(1e5), type=int, help='Window at which to agregate breaks number')
+    parser.add_argument('-s', '--window-step', dest="window_step", default=int(1e4), type=int, help='Step after each window')
+    parser.add_argument('-n', '--kde-bandwidth', dest="kde_bandwidth", default=int(1e3), type=int, help='Number of bins')
+    parser.add_argument('-b', '--kde-binwidth', dest="kde_binwidth", default=int(1e5), type=int, help='Number of bins')
+    parser.add_argument('-a', '--kde-algorithm', dest="kde_algorithm", default="epanechnikov", help='Algorithm used for kernel density estimation')
+    # args = parser.parse_args(["app", "data/breaks/*_DMSO.bed", "data/breaks_window", "window", "--window-size", "100000", "--window-step", "10000"])
+    # args = parser.parse_args(["app", "data/breaks/*_DMSO.bed", "data/breaks_kde", "kde", "--kde-bins", "100000", "--kde-bandwidth", "100", "--kde-algorithm", "epanechnikov"])
     args = parser.parse_args()
-    parser.parse_args(["data/breaks/*_DMSO.bed", "data/mm9/mm9.chrom.sizes", "data/breaks_wig", "-w", "100000", "-s", "10000"])
-
-    if args.track_name is None:
-        args.track_name = os.path.basename(args.output_path)
 
     main(args)
