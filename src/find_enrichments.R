@@ -1,6 +1,8 @@
 library(readr)
 library(dplyr)
 library(stringr)
+library(ggplot2)
+library(ROCR)
 
 bait_region_size = 4e6
 
@@ -30,16 +32,23 @@ peaks_coltypes = cols(
 )
 
 dir.create("data/epic2", recursive=T, showWarnings=F)
+dir.create("data/sicer1", recursive=T, showWarnings=F)
 dir.create("data/sicer2", recursive=T, showWarnings=F)
 
-results = data.frame()
+sicer_params = list(window=30000, gap=90000, e_value=0.1)
+epic2_control_results.cols = cols("peak_chrom"=col_character(), peak_start=col_double(), peak_end=col_double(), peak_breaks_count=col_double(), peak_score = col_double(), peak_strand=col_character())
+sicer_control_results.cols = cols("peak_chrom"=col_character(), peak_start=col_double(), peak_end=col_double(), peak_score = col_double())
+epic2_control_results = data.frame()
+sicer_control_results = data.frame()
 for(breaks_bed in list.files("data/breaks", pattern="*_APH_no10kb_Merge.bed", full.names=T)) {
-    bait_chrom = gsub("(chr)([^_]+).*$", "\\L\\1\\2", basename(breaks_bed), perl=T, ignore.case=T)
+    x.bait_chrom = gsub("(chr)([^_]+).*$", "\\L\\1\\2", basename(breaks_bed), perl=T, ignore.case=T)
     breaks_control_bed = gsub("_APH_no10kb_Merge.bed", "_DMSO.bed", breaks_bed)
     breaks_filtered_bed = paste0("tmp/", basename(gsub("\\.bed$", "_filtered.bed", breaks_bed)))
     breaks_control_filtered_bed = paste0("tmp/", basename(gsub("\\.bed$", "_filtered.bed", breaks_control_bed)))
-    output_control_bed = stringr::str_glue("data/epic2/{chrom}_both", chrom=bait_chrom)
-    writeLines(stringr::str_glue("Processing {bait}...", bait=bait_chrom))
+    epic2_control_bed = stringr::str_glue("data/epic2/{chrom}_both", chrom=x.bait_chrom)
+    sicer_control_bed = stringr::str_glue("data/sicer1/{sample}-W{format(window, scientific=F)}-G{format(gap, scientific=F)}-E{format(e_value, scientific=F)}.scoreisland", window=sicer_params["window"], gap=sicer_params["gap"], e_value=sicer_params["e_value"], sample=gsub("\\.bed$", "", basename(breaks_control_filtered_bed)))
+
+    writeLines(stringr::str_glue("Processing {bait}...", bait=x.bait_chrom))
     if(!file.exists(breaks_control_bed)) {
         writeLines("Control doesn't exist. Skipping...")
         next()
@@ -47,93 +56,118 @@ for(breaks_bed in list.files("data/breaks", pattern="*_APH_no10kb_Merge.bed", fu
 
     bed_cols = cols(chr=col_character(), start=col_double(), end=col_double(), name=col_character(), score=col_character(), strand=col_character())
 
+    x.offtargets = offtargets_df %>% dplyr::filter(offtarget_mismatches==0 & bait_chrom==x.bait_chrom)
     readr::read_tsv(breaks_control_bed, col_names=names(bed_cols$cols), col_types=bed_cols) %>%
-      dplyr::mutate(start=ifelse(strand=="-", start-20, start), end=ifelse(strand=="+", end+20, end), score=1) %>%
+      dplyr::filter(!(start >= x.offtargets$offtarget_start-2e6 & end<=x.offtargets$offtarget_start+2e6 & x.offtargets$offtarget_chrom==chr)) %>%
+      dplyr::mutate(start=ifelse(strand=="-", start-20, start), end=ifelse(strand=="+", end+20, end)) %>%
+      dplyr::mutate(score=1) %>%
       readr::write_tsv(file=breaks_control_filtered_bed, col_names=F)
 
     readr::read_tsv(breaks_bed, col_names=names(bed_cols$cols), col_types=bed_cols) %>%
-      dplyr::mutate(start=ifelse(strand=="-", start-20, start), end=ifelse(strand=="+", end+20, end), score=1) %>%
+      dplyr::filter(!(start >= x.offtargets$offtarget_start-2e6 & end<=x.offtargets$offtarget_start+2e6 & x.offtargets$offtarget_chrom==chr)) %>%
+      dplyr::mutate(start=ifelse(strand=="-", start-20, start), end=ifelse(strand=="+", end+20, end)) %>%
+      dplyr::mutate(score=1) %>%
       readr::write_tsv(file=breaks_filtered_bed, col_names=F)
 
-    output_control_enrichment = paste0(tempdir, "/", bait_chrom, "_control")
+    output_control_enrichment = paste0(tempdir, "/", x.bait_chrom, "_control")
 
     # Run enrichment detection on control
     writeLines(stringr::str_glue("Calculate enrichments for control: '{output}'...", output=output_control_enrichment))
 
-    #Species=mm9, redundancy threshold=5, window size=30000, fragment size=1, effective genome fraction=0.74, gap size=90000, E-value=0.1
-    system(stringr::str_glue("venv/bin/epic2 --genome mm9 --bin-size 30000 --fragment-size 1 --gaps-allowed 3 -t {input} -c {control} -o {output}", input=breaks_filtered_bed, control=breaks_control_filtered_bed, output=output_control_bed))
-    system(stringr::str_glue("venv/bin/epic2 --genome mm9 --bin-size 30000 --fragment-size 1 --gaps-allowed 3 -t {input} -o {output}", input=breaks_filtered_bed, output=output_control_bed))
-    system(stringr::str_glue("venv/bin/sicer -s mm9 --redundancy_threshold 5 --window_size 30000 --fragment_size 1 -egf 0.74 --gap_size 90000 --e_value 0.1 --cpu 24  -t {input} -c {control} -o {output_dir}", input=breaks_filtered_bed, control=breaks_control_filtered_bed, output_dir="data/sicer2"))
-    system(stringr::str_glue("venv/bin/sicer -s mm9 --redundancy_threshold 5 --window_size 30000 --fragment_size 1 -egf 0.74 --gap_size 90000 --e_value 0.1 --cpu 24  -t {input} -o {output_dir}", input=breaks_filtered_bed, output_dir="data/sicer2"))
+    # #Species=mm9, redundancy threshold=5, window size=30000, fragment size=1, effective genome fraction=0.74, gap size=90000, E-value=0.1
+    # system(stringr::str_glue("venv/bin/epic2 --genome mm9 --bin-size 30000 --fragment-size 1 --gaps-allowed 3 -t {input} -c {control} -o {output}", input=breaks_filtered_bed, control=breaks_control_filtered_bed, output=output_control_bed))
+    # system(stringr::str_glue("venv/bin/epic2 --genome mm9 --bin-size 30000 --fragment-size 1 --gaps-allowed 3 -t {input} -o {output}", input=breaks_filtered_bed, output=output_control_bed))
+    # system(stringr::str_glue("venv/bin/sicer -s mm9 --redundancy_threshold 5 --window_size 30000 --fragment_size 1 -egf 0.74 --gap_size 90000 --e_value 0.1 --cpu 24  -t {input} -c {control} -o {output_dir}", input=breaks_filtered_bed, control=breaks_control_filtered_bed, output_dir="data/sicer2"))
+    # system(stringr::str_glue("venv/bin/sicer -s mm9 --redundancy_threshold 5 --window_size 30000 --fragment_size 1 -egf 0.74 --gap_size 90000 --e_value 0.1 --cpu 24  -t {input} -o {output_dir}", input=breaks_filtered_bed, output_dir="data/sicer2"))
+    #
+    # system(stringr::str_glue("venv/bin/recognicer -s mm9 --redundancy_threshold 5 --window_size 100 --fragment_size 1 -egf 0.74 --gap_size 100 --e_value 0.1 --cpu 24  -t {input} -o {output_dir}", input=breaks_filtered_bed, output_dir="data/sicer2"))
+    #
+    #
+    # # Species=mm9, redundancy threshold=5, window size=30000, fragment size=1, effective genome fraction=0.74, gap size=90000, FDR=0.01
+    # system(stringr::str_glue("sh SICER1.1/SICER/SICER.sh {input_dir} {input} {control} {output_dir} {genome} {r_threshold} {window_size} {fragment_size} {fraction} {gap_size} {fdr}",
+    #                          input_dir=dirname(breaks_filtered_bed),
+    #                          input=basename(breaks_filtered_bed),
+    #                          control=basename(breaks_control_filtered_bed),
+    #                          output_dir="data/sicer1",
+    #                          genome="mm9",
+    #                          fraction=0.74,
+    #                          r_threshold=5,
+    #                          window_size=30000,
+    #                          fragment_size=1,
+    #                          gap_size=90000,
+    #                          fdr=0.01
+    # ))
+    #
+    # system("rm data/sicer1/*")
+    #
+    # # ORIGINAL FROM WEI
 
-    system(stringr::str_glue("venv/bin/recognicer -s mm9 --redundancy_threshold 5 --window_size 100 --fragment_size 1 -egf 0.74 --gap_size 100 --e_value 0.1 --cpu 24  -t {input} -o {output_dir}", input=breaks_filtered_bed, output_dir="data/sicer2"))
-
-
-    # Species=mm9, redundancy threshold=5, window size=30000, fragment size=1, effective genome fraction=0.74, gap size=90000, FDR=0.01
-    system(stringr::str_glue("sh SICER1.1/SICER/SICER.sh {input_dir} {input} {control} {output_dir} {genome} {r_threshold} {window_size} {fragment_size} {fraction} {gap_size} {fdr}",
-                             input_dir=dirname(breaks_filtered_bed),
-                             input=basename(breaks_filtered_bed),
-                             control=basename(breaks_control_filtered_bed),
-                             output_dir="data/sicer1",
-                             genome="mm9",
-                             fraction=0.74,
-                             r_threshold=5,
-                             window_size=30000,
-                             fragment_size=1,
-                             gap_size=90000,
-                             fdr=0.01
+    system(stringr::str_glue("sh SICER1.1/SICER/SICER.sh {input_dir} {input} {control} {output_dir} {genome} {format(r_threshold, scientific=F)} {format(window_size, scientific=F)} {format(fragment_size, scientific=F)} {format(fraction, scientific=F)} {format(gap_size, scientific=F)} {format(fdr, scientific=F)}",
+                     input_dir=dirname(breaks_control_filtered_bed),
+                     input=basename(breaks_filtered_bed),
+                     control=basename(breaks_control_filtered_bed),
+                     output_dir="data/sicer1",
+                     genome="mm9",
+                     fraction=0.74,
+                     r_threshold=5,
+                     window_size=sicer_params["window"],
+                     fragment_size=1,
+                     gap_size=sicer_params["gap"],
+                     fdr=0.01
     ))
 
-    system("rm data/sicer1/*")
-
-    # ORIGINAL FROM WEI
-    system(stringr::str_glue("sh SICER1.1/SICER/SICER-rb.sh {input_dir} {input} {output_dir} {genome} {r_threshold} {window_size} {fragment_size} {fraction} {gap_size} {e_value}",
-                     input_dir=dirname(breaks_filtered_bed),
+    system(stringr::str_glue("sh SICER1.1/SICER/SICER-rb.sh {input_dir} {input} {output_dir} {genome} {format(r_threshold, scientific=F)} {format(window_size, scientific=F)} {format(fragment_size, scientific=F)} {format(fraction, scientific=F)} {format(gap_size, scientific=F)} {format(e_value, scientific=F)}",
+                     input_dir=dirname(breaks_control_filtered_bed),
                      input=basename(breaks_control_filtered_bed),
                      output_dir="data/sicer1",
                      genome="mm9",
                      fraction=0.74,
                      r_threshold=5,
-                     window_size=30000,
+                     window_size=sicer_params["window"],
                      fragment_size=1,
-                     gap_size=90000,
-                     e_value=0.1
+                     gap_size=sicer_params["gap"],
+                     e_value=sicer_params["e_value"]
     ))
+    sicer_control_output = readr::read_tsv(sicer_control_bed, col_names=names(sicer_control_results.cols$cols), col_types=sicer_control_results.cols) %>%
+      dplyr::mutate(bait_chrom=x.bait_chrom)
+    sicer_control_results = rbind(sicer_control_results, sicer_control_output)
+    #
+    # # Working for Chrom3 and Chrom1 (but needs tuning everytime)
+    # system(stringr::str_glue("sh SICER1.1/SICER/SICER-rb.sh {input_dir} {input} {output_dir} {genome} {format(r_threshold, scientific=F)} {format(window_size, scientific=F)} {fragment_size} {fraction} {format(gap_size, scientific=F)} {format(e_value, scientific=F)}",
+    #                  input_dir=dirname(breaks_filtered_bed),
+    #                  input=basename(breaks_control_filtered_bed),
+    #                  output_dir="data/sicer1",
+    #                  genome="mm9",
+    #                  fraction=0.74,
+    #                  r_threshold=100000,
+    #                  window_size=1000,
+    #                  fragment_size=20,
+    #                  gap_size=3000,
+    #                  e_value=1e-15
+    # ))
+    #
+    #
+    # # Equivalent with SICER2, but e-value in sicer 2 has to be integer (BUG!)
+    # system(stringr::str_glue("venv/bin/sicer -s mm9 --redundancy_threshold 100000 --window_size 1000 --fragment_size 20 -egf 0.74 --gap_size 3000 --e_value 1 --cpu 24  -t {input} -o {output_dir}", input=breaks_control_filtered_bed, output_dir="data/sicer2"))
+    # system(stringr::str_glue("sh SICER1.1/SICER/SICER-rb.sh {input_dir} {input} {output_dir} {genome} {format(r_threshold, scientific=F)} {format(window_size, scientific=F)} {fragment_size} {fraction} {format(gap_size, scientific=F)} {format(e_value, scientific=F)}",
+    #                  input_dir=dirname(breaks_filtered_bed),
+    #                  input=basename(breaks_control_filtered_bed),
+    #                  output_dir="data/sicer1",
+    #                  genome="mm9",
+    #                  fraction=0.74,
+    #                  r_threshold=100000,
+    #                  window_size=1000,
+    #                  fragment_size=20,
+    #                  gap_size=3000,
+    #                  e_value=1
+    # ))
 
-    # Working for Chrom3 and Chrom1 (but needs tuning everytime)
-    system(stringr::str_glue("sh SICER1.1/SICER/SICER-rb.sh {input_dir} {input} {output_dir} {genome} {format(r_threshold, scientific=F)} {format(window_size, scientific=F)} {fragment_size} {fraction} {format(gap_size, scientific=F)} {format(e_value, scientific=F)}",
-                     input_dir=dirname(breaks_filtered_bed),
-                     input=basename(breaks_control_filtered_bed),
-                     output_dir="data/sicer1",
-                     genome="mm9",
-                     fraction=0.74,
-                     r_threshold=100000,
-                     window_size=1000,
-                     fragment_size=20,
-                     gap_size=3000,
-                     e_value=1e-15
-    ))
-
-
-    # Equivalent with SICER2, but e-value in sicer 2 has to be integer (BUG!)
-    system(stringr::str_glue("venv/bin/sicer -s mm9 --redundancy_threshold 100000 --window_size 1000 --fragment_size 20 -egf 0.74 --gap_size 3000 --e_value 1 --cpu 24  -t {input} -o {output_dir}", input=breaks_control_filtered_bed, output_dir="data/sicer2"))
-    system(stringr::str_glue("sh SICER1.1/SICER/SICER-rb.sh {input_dir} {input} {output_dir} {genome} {format(r_threshold, scientific=F)} {format(window_size, scientific=F)} {fragment_size} {fraction} {format(gap_size, scientific=F)} {format(e_value, scientific=F)}",
-                     input_dir=dirname(breaks_filtered_bed),
-                     input=basename(breaks_control_filtered_bed),
-                     output_dir="data/sicer1",
-                     genome="mm9",
-                     fraction=0.74,
-                     r_threshold=100000,
-                     window_size=1000,
-                     fragment_size=20,
-                     gap_size=3000,
-                     e_value=1
-    ))
-
-    system(stringr::str_glue("venv/bin/epic2 --genome mm9 --bin-size 10000 -kd --fragment-size 20 --gaps-allowed 3 -e 1 -t {input} -o {output}", input=breaks_control_filtered_bed, output=output_control_bed))
-
-
-    print("")
+    # # Species=mm9, redundancy threshold=5, window size=30000, fragment size=1, effective genome fraction=0.74, gap size=90000, FDR=0.01
+    # system(stringr::str_glue("epic2 --genome mm9 --bin-size 10000 -kd --fragment-size 20 --gaps-allowed 3 -e 1 -t {input} -o {output}", input=breaks_control_filtered_bed, output=epic2_control_bed))
+    system(stringr::str_glue("epic2 --genome mm9 --bin-size 10000 -kd --fragment-size 20 --gaps-allowed 3 -e 1 -t {input} -o {output}", input=breaks_control_filtered_bed, output=epic2_control_bed))
+    epic2_control_output = readr::read_tsv(epic2_control_bed, col_names=names(epic2_control_results.cols$cols), col_types=epic2_control_results.cols, skip=1) %>%
+      dplyr::mutate(bait_chrom=x.bait_chrom)
+    epic2_control_results = rbind(epic2_control_results, epic2_control_output)
 
 
     #cmd_enrichment_control = stringr::str_glue(
@@ -161,6 +195,49 @@ for(breaks_bed in list.files("data/breaks", pattern="*_APH_no10kb_Merge.bed", fu
     #
     # readr::read_tsv(paste0(macs2_outdir, "/", macs2_sample, "_summits.bed"), col_names=F)
 }
+
+x = sicer_control_results %>%
+    dplyr::filter(peak_score>100) %>%
+    dplyr::left_join(offtargets_df %>% dplyr::filter(offtarget_mismatches>0), by=c("bait_chrom", "peak_chrom"="offtarget_chrom")) %>%
+    dplyr::mutate(peak_is_predicted=!is.na(offtarget_start) & peak_start>=offtarget_start & offtarget_start<=peak_end) %>%
+    dplyr::arrange(dplyr::desc(peak_is_predicted)) %>%
+    dplyr::distinct(bait_chrom, peak_chrom, peak_start, peak_end, .keep_all=T)
+table(predicted=x$peak_is_predicted)
+table(predicted=x$peak_is_predicted, mismatches=x$offtarget_mismatches, x$bait_chrom==x$peak_chrom)
+
+x = epic2_control_results %>%
+    # dplyr::filter(peak_score>200) %>%
+    dplyr::left_join(offtargets_df %>% dplyr::filter(offtarget_mismatches>0), by=c("bait_chrom", "peak_chrom"="offtarget_chrom")) %>%
+    dplyr::mutate(peak_is_predicted=!is.na(offtarget_start) & peak_start<=offtarget_start & offtarget_start<=peak_end) %>%
+    dplyr::arrange(dplyr::desc(peak_is_predicted)) %>%
+    dplyr::distinct(bait_chrom, peak_chrom, peak_start, peak_end, .keep_all=T)
+table(predicted=x$peak_is_predicted)
+
+y = offtargets_df %>%
+  dplyr::filter(offtarget_mismatches>0) %>%
+  dplyr::left_join(sicer_control_results %>% dplyr::filter(peak_score>100), by=c("bait_chrom", "offtarget_chrom"="peak_chrom")) %>%
+  dplyr::mutate(offtarget_is_confirmed=!is.na(peak_score) & peak_start<=offtarget_start & offtarget_start<=peak_end) %>%
+  dplyr::arrange(dplyr::desc(offtarget_is_confirmed)) %>%
+  dplyr::distinct(bait_chrom, offtarget_chrom, offtarget_start, offtarget_start, .keep_all=T)
+table(confirmed=y$offtarget_is_confirmed)
+
+
+pred <- ROCR::prediction(x$peak_score, x$peak_is_predicted)
+perf <- ROCR::performance(pred, measure = "prec", x.measure="rec")
+perf <- ROCR::performance(pred, measure = "tpr", x.measure = "fpr")
+plot(perf, colorize = TRUE); abline(a=0, b=1)
+
+
+ggplot(x) +
+  geom_boxplot(aes(x=peak_is_predicted, y=log10(peak_score)))
+  # geom_violin(aes(x=peak_is_predicted, y=log10(peak_score)))
+ggplot(y) +
+  geom_violin(aes(x=offtarget_is_confirmed, y=offtarget_mismatches))
+
+
+
+breaksites_df
+    print("")
 
 
 offtargets_ranges = with(offtargets_df, IRanges::IRanges(start=offtarget_start, end=offtarget_end))
