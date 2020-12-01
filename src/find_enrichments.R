@@ -35,7 +35,7 @@ dir.create("data/epic2", recursive=T, showWarnings=F)
 dir.create("data/sicer1", recursive=T, showWarnings=F)
 dir.create("data/sicer2", recursive=T, showWarnings=F)
 
-sicer_params = list(window=30000, gap=90000, e_value=0.1)
+sicer_params = list(window=30000, gap=90000, e_value=0.1, fdr=0.01)
 epic2_control_results.cols = cols("peak_chrom"=col_character(), peak_start=col_double(), peak_end=col_double(), peak_breaks_count=col_double(), peak_score = col_double(), peak_strand=col_character())
 sicer_control_results.cols = cols("peak_chrom"=col_character(), peak_start=col_double(), peak_end=col_double(), peak_score = col_double())
 epic2_control_results = data.frame()
@@ -47,6 +47,7 @@ for(breaks_bed in list.files("data/breaks", pattern="*_APH_no10kb_Merge.bed", fu
     breaks_control_filtered_bed = paste0("tmp/", basename(gsub("\\.bed$", "_filtered.bed", breaks_control_bed)))
     epic2_control_bed = stringr::str_glue("data/epic2/{chrom}_both", chrom=x.bait_chrom)
     sicer_control_bed = stringr::str_glue("data/sicer1/{sample}-W{format(window, scientific=F)}-G{format(gap, scientific=F)}-E{format(e_value, scientific=F)}.scoreisland", window=sicer_params["window"], gap=sicer_params["gap"], e_value=sicer_params["e_value"], sample=gsub("\\.bed$", "", basename(breaks_control_filtered_bed)))
+    sicer_diff_bed = stringr::str_glue("data/sicer1/{sample}-W{format(window, scientific=F)}-G{format(gap, scientific=F)}-FDR{format(fdr, scientific=F)}.scoreisland", window=sicer_params["window"], gap=sicer_params["gap"], fdr=sicer_params["fdr"], sample=gsub("\\.bed$", "", basename(breaks_control_filtered_bed)))
 
     writeLines(stringr::str_glue("Processing {bait}...", bait=x.bait_chrom))
     if(!file.exists(breaks_control_bed)) {
@@ -102,6 +103,9 @@ for(breaks_bed in list.files("data/breaks", pattern="*_APH_no10kb_Merge.bed", fu
     #
     # # ORIGINAL FROM WEI
 
+    # curl https://bootstrap.pypa.io/get-pip.py --output get-pip.py
+    # python -m pip install scipy
+
     system(stringr::str_glue("sh SICER1.1/SICER/SICER.sh {input_dir} {input} {control} {output_dir} {genome} {format(r_threshold, scientific=F)} {format(window_size, scientific=F)} {format(fragment_size, scientific=F)} {format(fraction, scientific=F)} {format(gap_size, scientific=F)} {format(fdr, scientific=F)}",
                      input_dir=dirname(breaks_control_filtered_bed),
                      input=basename(breaks_filtered_bed),
@@ -113,7 +117,7 @@ for(breaks_bed in list.files("data/breaks", pattern="*_APH_no10kb_Merge.bed", fu
                      window_size=sicer_params["window"],
                      fragment_size=1,
                      gap_size=sicer_params["gap"],
-                     fdr=0.01
+                     fdr=sicer_params["fdr"]
     ))
 
     system(stringr::str_glue("sh SICER1.1/SICER/SICER-rb.sh {input_dir} {input} {output_dir} {genome} {format(r_threshold, scientific=F)} {format(window_size, scientific=F)} {format(fragment_size, scientific=F)} {format(fraction, scientific=F)} {format(gap_size, scientific=F)} {format(e_value, scientific=F)}",
