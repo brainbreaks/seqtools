@@ -17,19 +17,7 @@ breaksites_df = offtargets_df %>% # Doesn't have position for Chr6
 tempdir = "tmp"
 enrichment_outdir = "data/enrichment"
 junctions_cols = c("junction_chrom", "junction_start", "junction_end", "junction_name", "junction_score", "junction_strand")
-peaks_cols = c("control_peak_chrom", "control_peak_start", "control_peak_end", "control_peak_length", "control_peak_summit", "control_peak_pileup", "control_peak_log10pvalue", "control_peak_fc", "control_peak_log10qvalue", "control_peak_name")
-peaks_coltypes = cols(
-  control_peak_chrom = col_character(),
-  control_peak_start = col_double(),
-  control_peak_end = col_double(),
-  control_peak_length = col_double(),
-  control_peak_summit = col_double(),
-  control_peak_pileup = col_double(),
-  control_peak_log10pvalue = col_double(),
-  control_peak_fc = col_double(),
-  control_peak_log10qvalue = col_double(),
-  control_peak_name = col_character()
-)
+
 
 dir.create("data/epic2", recursive=T, showWarnings=F)
 dir.create("data/sicer1", recursive=T, showWarnings=F)
@@ -40,6 +28,7 @@ epic2_control_results.cols = cols("peak_chrom"=col_character(), peak_start=col_d
 sicer_control_results.cols = cols("peak_chrom"=col_character(), peak_start=col_double(), peak_end=col_double(), peak_score = col_double())
 epic2_control_results = data.frame()
 sicer_control_results = data.frame()
+sicer_diff_results = data.frame()
 for(breaks_bed in list.files("data/breaks", pattern="*_APH_no10kb_Merge.bed", full.names=T)) {
     x.bait_chrom = gsub("(chr)([^_]+).*$", "\\L\\1\\2", basename(breaks_bed), perl=T, ignore.case=T)
     breaks_control_bed = gsub("_APH_no10kb_Merge.bed", "_DMSO.bed", breaks_bed)
@@ -47,7 +36,7 @@ for(breaks_bed in list.files("data/breaks", pattern="*_APH_no10kb_Merge.bed", fu
     breaks_control_filtered_bed = paste0("tmp/", basename(gsub("\\.bed$", "_filtered.bed", breaks_control_bed)))
     epic2_control_bed = stringr::str_glue("data/epic2/{chrom}_both", chrom=x.bait_chrom)
     sicer_control_bed = stringr::str_glue("data/sicer1/{sample}-W{format(window, scientific=F)}-G{format(gap, scientific=F)}-E{format(e_value, scientific=F)}.scoreisland", window=sicer_params["window"], gap=sicer_params["gap"], e_value=sicer_params["e_value"], sample=gsub("\\.bed$", "", basename(breaks_control_filtered_bed)))
-    sicer_diff_bed = stringr::str_glue("data/sicer1/{sample}-W{format(window, scientific=F)}-G{format(gap, scientific=F)}-FDR{format(fdr, scientific=F)}.scoreisland", window=sicer_params["window"], gap=sicer_params["gap"], fdr=sicer_params["fdr"], sample=gsub("\\.bed$", "", basename(breaks_control_filtered_bed)))
+    sicer_diff_bed = stringr::str_glue("data/sicer1/{sample}-W{format(window, scientific=F)}-G{format(gap, scientific=F)}-islands-summary", window=sicer_params["window"], gap=sicer_params["gap"], fdr=sicer_params["fdr"], sample=gsub("\\.bed$", "", basename(breaks_filtered_bed)))
 
     writeLines(stringr::str_glue("Processing {bait}...", bait=x.bait_chrom))
     if(!file.exists(breaks_control_bed)) {
@@ -119,6 +108,13 @@ for(breaks_bed in list.files("data/breaks", pattern="*_APH_no10kb_Merge.bed", fu
                      gap_size=sicer_params["gap"],
                      fdr=sicer_params["fdr"]
     ))
+
+    sicer_diff_bed.cols = cols(peak_chrom=col_character(), peak_start=col_double(), peak_end=col_double(), peak_sample_breaks_count=col_double(), peak_control_breaks_count=col_double(), peak_pvalue=col_double(), peak_fc=col_double(), peak_fdr=col_double())
+    sicer_diff_output = readr::read_tsv(sicer_diff_bed, col_names=names(sicer_diff_bed.cols$cols), col_types=sicer_diff_bed.cols) %>%
+      dplyr::mutate(bait_chrom=x.bait_chrom)
+    sicer_diff_results = rbind(sicer_diff_results, sicer_diff_output)
+
+
 
     system(stringr::str_glue("sh SICER1.1/SICER/SICER-rb.sh {input_dir} {input} {output_dir} {genome} {format(r_threshold, scientific=F)} {format(window_size, scientific=F)} {format(fragment_size, scientific=F)} {format(fraction, scientific=F)} {format(gap_size, scientific=F)} {format(e_value, scientific=F)}",
                      input_dir=dirname(breaks_control_filtered_bed),
@@ -231,6 +227,12 @@ perf <- ROCR::performance(pred, measure = "prec", x.measure="rec")
 perf <- ROCR::performance(pred, measure = "tpr", x.measure = "fpr")
 plot(perf, colorize = TRUE); abline(a=0, b=1)
 
+x = sicer_diff_results %>%
+  dplyr::filter(peak_fc > 1)
+sicer_diff_results %>%
+    dplyr::filter(peak_fc > 1) %>%
+    ggplot() +
+      geom_point(aes(x=peak_fc, y=-log10(peak_pvalue), color=peak_fdr<0.001))
 
 ggplot(x) +
   geom_boxplot(aes(x=peak_is_predicted, y=log10(peak_score)))
