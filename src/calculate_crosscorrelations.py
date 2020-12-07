@@ -21,25 +21,53 @@ from scipy.stats.stats import pearsonr
 
 def calculate_crosscorrelation(bed, name, lags=100, bandwidth=100, binwidth=100):
     sizes = bed.groupby(["Chromosome", "Strand"], as_index=False).agg({"Start":min, "End": max}).groupby("Chromosome").agg({"Start":min, "End": max}).to_dict()
-    for chr in set(bed["Chromosome"]):
-        kde_space = np.arange(sizes["Start"][chr] + binwidth*10, sizes["End"][chr] - binwidth*10, binwidth)[:, np.newaxis]
+    chrom_offsets = bed.groupby("Chromosome", as_index=False).agg({"Start": min, "End": max})
+    chrom_offsets["offset_length"] = chrom_offsets.End - chrom_offsets.Start + 1
+    chrom_offsets["offset_start"] = chrom_offsets.offset_length.cumsum() - chrom_offsets.offset_length - chrom_offsets.Start
+    chrom_offsets["offset_end"] = chrom_offsets.offset_length.cumsum() - chrom_offsets.Start
+    chrom_offsets = chrom_offsets[["Chromosome", "offset_start", "offset_end", "offset_length"]]
 
-        bed_chrom_sense = bed.query("Strand=='+' & Chromosome==@chr")
-        model_sense = KernelDensity(kernel="epanechnikov", bandwidth=bandwidth).fit(bed_chrom_sense["Start"].values[:, np.newaxis])
-        kde_sense = np.exp(model_sense.score_samples(kde_space))
+    bed_offset = bed.merge(chrom_offsets, on="Chromosome")
+    bed_offset.loc[:,"Start"] += bed_offset.loc[:,"offset_start"]
 
-        bed_chrom_anti = bed.query("Strand=='-' & Chromosome==@chr")
-        model_anti = KernelDensity(kernel="epanechnikov", bandwidth=bandwidth).fit(bed_chrom_anti["Start"].values[:, np.newaxis])
-        kde_anti = np.exp(model_anti.score_samples(kde_space))
+    bed_sense = bed_offset.query("Strand=='+'")
+    bed_anti = bed_offset.query("Strand=='-'")
 
-        lags = np.arange(0, lags)*binwidth
-        r = [pearsonr(kde_sense[:len(kde_sense)-i], kde_anti[i:])[1] for i in range(len(lags))]
+    model_sense = KernelDensity(kernel="epanechnikov", bandwidth=bandwidth).fit(bed_sense["Start"].values[:, np.newaxis])
+    model_anti = KernelDensity(kernel="epanechnikov", bandwidth=bandwidth).fit(bed_anti["Start"].values[:, np.newaxis])
 
-        fig, ax = plt.subplots()
-        plt.title(name)
-        ax.plot(lags, r)
-        plt.show()
+    prebin = 1e5
+    prekde_space = np.arange(0, chrom_offsets["offset_end"].max(), prebin)
+    prekde_sense = np.exp(model_sense.score_samples(prekde_space[:, np.newaxis]))
+    prekde_anti = np.exp(model_anti.score_samples(prekde_space[:, np.newaxis]))
 
+    q = [0.7, 0.9]
+    f1 = (prekde_anti>0) | (prekde_sense>0)
+    f = ((np.quantile(prekde_sense[f1], q[0])<prekde_sense) & (prekde_sense<np.quantile(prekde_sense[f1], q[1]))) | ((np.quantile(prekde_anti[f1], q[0])<prekde_anti) & (prekde_anti<np.quantile(prekde_anti[f1], q[1])))
+
+    kde_space = np.array([ss for s in prekde_space[f] for ss in np.arange(s, s+prebin, binwidth)])
+    # kde_space = np.arange(binwidth*10, chrom_offsets["offset_end"].max() - binwidth*10, binwidth)
+    kde_sense = np.exp(model_sense.score_samples(kde_space[:, np.newaxis]))
+    kde_anti = np.exp(model_anti.score_samples(kde_space[:, np.newaxis]))
+
+    q = [0.1, 0.9]
+    f1 = (kde_anti>0) | (kde_sense>0)
+    f = ((np.quantile(kde_sense[f1], q[0])<kde_sense) & (kde_sense<np.quantile(kde_sense[f1], q[1]))) | ((np.quantile(kde_anti[f1], q[0])<kde_sense) & (kde_sense<np.quantile(kde_anti[f1], q[1])))
+    kde_anti = kde_anti[f]
+    kde_sense = kde_sense[f]
+
+    lags = np.arange(0, lags)*binwidth
+    r = [pearsonr(kde_sense[:len(kde_sense)-i], kde_anti[i:])[1] for i in range(len(lags))]
+
+    fig, ax = plt.subplots()
+
+    plt.title(name)
+
+    ax.plot(lags, r)
+    # plt.show()
+    print(os.getcwd())
+    plt.savefig("{}.png".format(name))
+    print("1")
 
 
     pass
