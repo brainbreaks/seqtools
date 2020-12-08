@@ -3,6 +3,7 @@ library(readr)
 library(ggplot2)
 library(ggrepel)
 library(plotly)
+library(IRanges)
 
 
 breaksites = readr::read_tsv("data/offtargets_predicted.tsv") %>%
@@ -51,15 +52,6 @@ rdc = readr::read_tsv("data/rdc_pnas.tsv") %>%
   dplyr::mutate(rdc_id=1:n())
 
 
-breaks_ranges = with(breaks,  IRanges::IRanges(start=break_start, end=break_end, break_id=break_id, break_chrom=break_chrom))
-breaksites2break = as.data.frame(IRanges::mergeByOverlaps(breaksites_ranges, breaks_ranges)) %>%
-  dplyr::filter(break_chrom==breaksite_chrom) %>%
-  dplyr::distinct(break_id)
-breaks.f = breaks %>% dplyr::filter(!(break_id %in% breaksites2break$break_id))
-libsizes.f = breaks.f %>%
-  dplyr::group_by(break_sample, break_chrom) %>%
-  dplyr::summarise(library_size=n())
-
 #
 # Remove breaks close to bait
 #
@@ -78,9 +70,9 @@ libsizes.f = breaks.f %>%
 # Remove genes shorter than 800kb
 #
 groseq.f = groseq %>%
-  dplyr::filter(groseq_rpkm>0.1) %>%
+  dplyr::filter(groseq_rpkm>0.05) # %>%
   #dplyr::filter(dplyr::between(groseq_length, 10e3, 50e3)) # %>%
-  dplyr::filter(groseq_length>=800e3)
+  #dplyr::filter(groseq_length>=0e3)
 groseq_ranges.f = with(groseq.f, IRanges::IRanges(start=groseq_start, end=groseq_end, groseq_id=groseq_id, groseq_chrom=groseq_chrom))
 breaks_ranges.f = with(breaks.f, IRanges::IRanges(start=break_start, end=break_end, break_id=break_id, break_chrom=break_chrom))
 groseq2break.f.map = as.data.frame(IRanges::mergeByOverlaps(groseq_ranges.f, breaks_ranges.f)) %>%
@@ -95,20 +87,36 @@ groseq2break.f = groseq.f %>%
   dplyr::inner_join(libsizes.f, by=c("break_sample", "groseq_chrom"="break_chrom")) %>%
   dplyr::left_join(rdc, by=c("groseq_gene"="rdc_gene")) %>%
   dplyr::mutate(y=(breaks_count/groseq_length) / library_size, x=groseq_length, rdc_group=tidyr::replace_na(rdc_group, "N/A"), rdc_cluster=tidyr::replace_na(rdc_cluster, "N/A"), rdc_length=tidyr::replace_na(rdc_length, 0)) %>%
-  dplyr::filter(break_exp_condition=="Sample" & break_bait_chrom==groseq_chrom)
+  dplyr::filter(break_bait_chrom==groseq_chrom)
+groseq2break_fc.f = groseq2break.f %>%
+  dplyr::group_by(groseq_gene) %>%
+  dplyr::summarise(
+    s=which(break_exp_condition=="Sample"),
+    c=which(break_exp_condition=="Control"),
+    breaks_density_fc=log2((breaks_count[s]/breaks_count[c]) * (library_size[c]/library_size[s])))
+groseq2break.f = groseq2break.f %>%
+  dplyr::filter(break_exp_condition=="Sample") %>%
+  dplyr::inner_join(groseq2break_fc.f, by="groseq_gene")
 
 
-ggplot(groseq2break.f, aes(x=x, y=y)) +
-  geom_point(aes(size=rdc_length, color=rdc_group, name=groseq_gene, rdc_cluster=rdc_cluster, rdc_group=rdc_group)) +
-  ggrepel::geom_text_repel(aes(label=groseq_gene)) +
+ggplot(groseq2break.f %>% dplyr::filter(groseq_length<80e4), aes(y=breaks_density_fc, x=groseq_length/1000)) +
+  geom_point(aes(size=groseq_rpkm, color=rdc_group, name=groseq_gene, rdc_cluster=rdc_cluster, rdc_group=rdc_group), alpha=0.5) +
+  geom_smooth() +
+  geom_hline(yintercept=0)
+
+ggplot(groseq2break.f, aes(y=(breaks_count/groseq_length) / library_size, x=groseq_length/1000)) +
+  geom_point(aes(size=groseq_rpkm, color=rdc_group, name=groseq_gene, rdc_cluster=rdc_cluster, rdc_group=rdc_group)) +
+  geom_vline(xintercept=800) +
+  geom_vline(xintercept=80) +
+  #ggrepel::geom_text_repel(aes(label=groseq_gene)) +
   labs(x="gene length", y="junction density") +
-  coord_cartesian(ylim=c(0, 0.0000001))
+  coord_cartesian(ylim=c(0, 2e-7))
 
 
-p = plotly::ggplotly()
-htmlwidgets::saveWidget(plotly::as_widget(p), "viven.html")
+#p = plotly::ggplotly()
+#htmlwidgets::saveWidget(plotly::as_widget(p), "viven-0.10.html")
+
 plotly::ggplotly()
-
 
 
 validated_offtargets_overlapping = validated_offtargets %>%

@@ -1,8 +1,23 @@
 library(readr)
 library(dplyr)
+library(dbscan)
 library(stringr)
 library(ggplot2)
 library(ROCR)
+
+plotRanges <- function(x, xlim=x, main=deparse(substitute(x)), col="black", sep=0.5, ...)
+{
+    height <- 1
+    if (is(xlim, "IntegerRanges"))
+    xlim <- c(min(start(xlim)), max(end(xlim)))
+    bins <- disjointBins(IRanges(start(x), end(x) + 1))
+    plot.new()
+    plot.window(xlim, c(0, max(bins)*(height + sep)))
+    ybottom <- bins * (sep + height) - height
+    rect(start(x)-0.5, ybottom, end(x)+0.5, ybottom + height, col=col, ...)
+    title(main)
+    axis(1)
+}
 
 bait_region_size = 4e6
 
@@ -31,6 +46,7 @@ sicer_control_results = data.frame()
 sicer_diff_results = data.frame()
 for(breaks_bed in list.files("data/breaks", pattern="*_APH_no10kb_Merge.bed", full.names=T)) {
     x.bait_chrom = gsub("(chr)([^_]+).*$", "\\L\\1\\2", basename(breaks_bed), perl=T, ignore.case=T)
+    x.sample = gsub("\\.bed$", "", basename(breaks_control_bed))
     breaks_control_bed = gsub("_APH_no10kb_Merge.bed", "_DMSO.bed", breaks_bed)
     breaks_filtered_bed = paste0("tmp/", basename(gsub("\\.bed$", "_filtered.bed", breaks_bed)))
     breaks_control_filtered_bed = paste0("tmp/", basename(gsub("\\.bed$", "_filtered.bed", breaks_control_bed)))
@@ -59,6 +75,73 @@ for(breaks_bed in list.files("data/breaks", pattern="*_APH_no10kb_Merge.bed", fu
       dplyr::mutate(score=1) %>%
       readr::write_tsv(file=breaks_filtered_bed, col_names=F)
 
+    breaks = dplyr::bind_rows(
+      readr::read_tsv(breaks_bed, col_names=names(bed_cols$cols), col_types=bed_cols) %>% dplyr::mutate(break_exp_condition="Sample"),
+      readr::read_tsv(breaks_control_bed, col_names=names(bed_cols$cols), col_types=bed_cols) %>% dplyr::mutate(break_exp_condition="Control")) %>%
+      dplyr::mutate(end=start+1)
+    breaks_clusters = breaks %>%
+        dplyr::group_by(break_exp_condition, chr) %>%
+        dplyr::do((function(z){
+            #z = breaks_control %>% dplyr::filter(chr=="chr6")
+            zz<<-z
+
+            res.optics = dbscan::optics(matrix(z$start), minPts=50, eps=1e4)
+            res.xi = dbscan::extractXi(res.optics, xi=0.1)
+            #plot(res.xi)
+          plot(res.xi$coredist, type="l", ylim=c(0, 100))
+            if(is.null(res.xi$clusters_xi)) return(data.frame())
+
+            z.clusters = data.frame(res.xi$clusters_xi) %>%
+              dplyr::mutate(start=pmin(start, end), end=pmax(start, end)) %>%
+              dplyr::mutate(optics_start=start, optics_end=end, start=z$start[optics_start], end=z$end[optics_end])
+
+            z.clusters_ranges = with(z.clusters, IRanges::IRanges(start=start, end=end, cluster_id=cluster_id))
+            z.clusters_reduced = as.data.frame(IRanges::reduce(z.clusters_ranges, min.gapwidth=1, drop.empty.ranges=F, with.revmap=T)) %>% dplyr::mutate(reduced_cluster_id=1:n())
+            z.clusters_reduced_map = data.frame(reduced_cluster_id=c(rep(z.clusters_reduced$reduced_cluster_id, sapply(z.clusters_reduced$revmap, length)), 0), cluster_id=c(unlist(z.clusters_reduced$revmap), 0))
+            z.clusters_reduced_sizes = z.clusters_reduced_map %>%
+              dplyr::inner_join(z.clusters, by="cluster_id")  %>%
+              dplyr::group_by(reduced_cluster_id) %>%
+              dplyr::summarise(optics_start=min(optics_start), optics_end=max(optics_end))
+
+            z.clusters_reduced = z.clusters_reduced %>%
+              dplyr::inner_join(z.clusters_reduced_sizes, by="reduced_cluster_id") %>%
+              dplyr::mutate(chr=z$chr[1], cluster_size=optics_end-optics_start+1) %>%
+              dplyr::select(-revmap)
+
+            z.clusters_reduced
+
+            ## Debug merged
+            #res.xi$cluster = data.frame(cluster_id=as.numeric(res.xi$cluster)) %>% dplyr::inner_join(z.clusters_reduced_map, by="cluster_id") %>% .$reduced_cluster_id
+            #res.xi$clusters_xi = z.clusters_reduced %>%
+            #  dplyr::select(start=optics_start, end=optics_end, cluster_id=reduced_cluster_id) %>%
+            #  data.frame()
+            #plot(res.xi)
+            #
+            #dbscan::hullplot(matrix(z$start), res.xi)
+            #
+            #plotRanges(z.clusters_ranges)
+            #plotRanges(IRanges::reduce(z.clusters_ranges, min.gapwidth=1000, drop.empty.ranges=F, with.revmap=T))
+            #
+            #res.xi = dbscan::extractXi(res.optics, xi = 0.05)
+            #plot(res.xi)
+
+        })(.))
+
+    optics_control_bed = stringr::str_glue("data/optics/{sample}_optics.bed", sample=x.sample)
+    breaks_clusters_bed = breaks_clusters  %>%
+      dplyr::mutate(cluster_id=stringr::str_glue("{sample}_{chr}_{cluster}", sample=x.sample, chr=chr, cluster=1:n()), score=0) %>%
+      dplyr::select(chr, start, end, cluster_id, score)
+    readr::write_tsv(breaks_clusters_bed, file=optics_control_bed, col_names=F)
+
+    optics = IRanges(breaks_clusters$start, breaks_clusters$end, optics_chr=breaks_clusters$chr)
+    sicer = IRanges(sicer_control_output$peak_start, sicer_control_output$peak_end, sicer_chr=sicer_control_output$peak_chrom)
+
+    table(breaks_clusters$chr)
+    table(sicer_control_output$peak_chrom)
+    as.data.frame(IRanges::mergeByOverlaps(optics, sicer)) %>%
+      dplyr::filter(optics_chr==sicer_chr)
+
+    next
     output_control_enrichment = paste0(tempdir, "/", x.bait_chrom, "_control")
 
     # Run enrichment detection on control
@@ -95,24 +178,24 @@ for(breaks_bed in list.files("data/breaks", pattern="*_APH_no10kb_Merge.bed", fu
     # curl https://bootstrap.pypa.io/get-pip.py --output get-pip.py
     # python -m pip install scipy
 
-    system(stringr::str_glue("sh SICER1.1/SICER/SICER.sh {input_dir} {input} {control} {output_dir} {genome} {format(r_threshold, scientific=F)} {format(window_size, scientific=F)} {format(fragment_size, scientific=F)} {format(fraction, scientific=F)} {format(gap_size, scientific=F)} {format(fdr, scientific=F)}",
-                     input_dir=dirname(breaks_control_filtered_bed),
-                     input=basename(breaks_filtered_bed),
-                     control=basename(breaks_control_filtered_bed),
-                     output_dir="data/sicer1",
-                     genome="mm9",
-                     fraction=0.74,
-                     r_threshold=5,
-                     window_size=sicer_params["window"],
-                     fragment_size=1,
-                     gap_size=sicer_params["gap"],
-                     fdr=sicer_params["fdr"]
-    ))
-
-    sicer_diff_bed.cols = cols(peak_chrom=col_character(), peak_start=col_double(), peak_end=col_double(), peak_sample_breaks_count=col_double(), peak_control_breaks_count=col_double(), peak_pvalue=col_double(), peak_fc=col_double(), peak_fdr=col_double())
-    sicer_diff_output = readr::read_tsv(sicer_diff_bed, col_names=names(sicer_diff_bed.cols$cols), col_types=sicer_diff_bed.cols) %>%
-      dplyr::mutate(bait_chrom=x.bait_chrom)
-    sicer_diff_results = rbind(sicer_diff_results, sicer_diff_output)
+    #system(stringr::str_glue("sh SICER1.1/SICER/SICER.sh {input_dir} {input} {control} {output_dir} {genome} {format(r_threshold, scientific=F)} {format(window_size, scientific=F)} {format(fragment_size, scientific=F)} {format(fraction, scientific=F)} {format(gap_size, scientific=F)} {format(fdr, scientific=F)}",
+    #                 input_dir=dirname(breaks_control_filtered_bed),
+    #                 input=basename(breaks_filtered_bed),
+    #                 control=basename(breaks_control_filtered_bed),
+    #                 output_dir="data/sicer1",
+    #                 genome="mm9",
+    #                 fraction=0.74,
+    #                 r_threshold=5,
+    #                 window_size=sicer_params["window"],
+    #                 fragment_size=1,
+    #                 gap_size=sicer_params["gap"],
+    #                 fdr=sicer_params["fdr"]
+    #))
+    #
+    #sicer_diff_bed.cols = cols(peak_chrom=col_character(), peak_start=col_double(), peak_end=col_double(), peak_sample_breaks_count=col_double(), peak_control_breaks_count=col_double(), peak_pvalue=col_double(), peak_fc=col_double(), peak_fdr=col_double())
+    #sicer_diff_output = readr::read_tsv(sicer_diff_bed, col_names=names(sicer_diff_bed.cols$cols), col_types=sicer_diff_bed.cols) %>%
+    #  dplyr::mutate(bait_chrom=x.bait_chrom)
+    #sicer_diff_results = rbind(sicer_diff_results, sicer_diff_output)
 
 
 
@@ -130,6 +213,7 @@ for(breaks_bed in list.files("data/breaks", pattern="*_APH_no10kb_Merge.bed", fu
     ))
     sicer_control_output = readr::read_tsv(sicer_control_bed, col_names=names(sicer_control_results.cols$cols), col_types=sicer_control_results.cols) %>%
       dplyr::mutate(bait_chrom=x.bait_chrom)
+    readr::write_tsv(sicer_control_output %>% dplyr::mutate(peak_id=paste0("peak", 1:n())) %>% dplyr::select(peak_chrom, peak_start, peak_end, peak_id, peak_score), col_names=F, file=paste0(sicer_control_bed, ".bed"))
     sicer_control_results = rbind(sicer_control_results, sicer_control_output)
     #
     # # Working for Chrom3 and Chrom1 (but needs tuning everytime)
@@ -241,9 +325,6 @@ ggplot(y) +
   geom_violin(aes(x=offtarget_is_confirmed, y=offtarget_mismatches))
 
 
-
-breaksites_df
-    print("")
 
 
 offtargets_ranges = with(offtargets_df, IRanges::IRanges(start=offtarget_start, end=offtarget_end))

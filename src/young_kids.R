@@ -6,17 +6,13 @@ library(plotly)
 library(GenomeInfoDb)
 library(BSgenome)
 library(Gviz)
-library(karyoploteR)
-library(regioneR)
-library(zoo)
-library(TxDb.Mmusculus.UCSC.mm9.knownGene)
 # BiocManager::install("BSgenome.Mmusculus.UCSC.mm9")
 # BiocManager::install("TxDb.Mmusculus.UCSC.mm9.knownGene")
 
 
 plot_breaks = function(breaks2groseq, gene_name, mm9, mm9_txdb.gtf) {
   breaks_display = breaks2groseq %>%
-    dplyr::filter(groseq_gene==gene_name & break_bait_chrom==break_chrom) %>%
+    dplyr::filter(groseq_gene==gene_name) %>%
     dplyr::mutate(group=break_strand)
 
   breaks_ranges_display.control_plus = GenomicRanges::makeGRangesFromDataFrame(breaks_display %>% dplyr::filter(break_exp_condition=="Control" & break_strand=="+"), start.field="break_start", end.field="break_end", seqnames.field="break_chrom", seqinfo=mm9, strand.field="break_strand", keep.extra.columns=T)
@@ -24,39 +20,59 @@ plot_breaks = function(breaks2groseq, gene_name, mm9, mm9_txdb.gtf) {
   breaks_ranges_display.sample_plus = GenomicRanges::makeGRangesFromDataFrame(breaks_display %>% dplyr::filter(break_exp_condition=="Sample" & break_strand=="+"), start.field="break_start", end.field="break_end", seqnames.field="break_chrom", seqinfo=mm9, strand.field="break_strand", keep.extra.columns=T)
   breaks_ranges_display.sample_minus = GenomicRanges::makeGRangesFromDataFrame(breaks_display %>% dplyr::filter(break_exp_condition=="Sample" & break_strand=="-"), start.field="break_start", end.field="break_end", seqnames.field="break_chrom", seqinfo=mm9, strand.field="break_strand", keep.extra.columns=T)
 
+  breaks_count = breaks_display %>%
+    dplyr::group_by(break_exp_condition) %>%
+    dplyr::summarize(n=n()) %>%
+    tibble::column_to_rownames("break_exp_condition")
+
   breaks_display.density = breaks_display %>%
     dplyr::group_by(break_exp_condition, groseq_gene, groseq_start, groseq_end, break_chrom, break_strand, display_start, display_end) %>%
     dplyr::do((function(z) {
       zz<<-z
-        d = density(z$break_start, from=min(z$display_start), to=max(z$display_end), bw=2e4)
-        x = seq(min(z$display_start), to=max(z$display_end), by=10000)
-        y = stats::approx(d$x, d$y, xout=x)$y
-        l = length(x)
-        data.frame(density_start=x[-l], density_end=x[-1], density_value=nrow(z)*ifelse(z$break_strand[1]=="+",1,-1) * y[-1])
+        from = min(z$display_start)
+        to = max(z$display_end)
+        n = round((to - from)/10000)
+        d = density(z$break_start, from=from, to=to, bw=2e4, n=n)
+        d.bin = d$x[2L] - d$x[1L]
+        d.count = zoo::rollsum(d$y, 2)*d.bin*nrow(z)/2
+
+      data.frame(density_start=d$x[-length(d$x)], density_end=d$x[-1], density_value=d.count*ifelse(z$break_strand[1]=="+",1,-1))
+
+        #x = seq(d$x[1], to=d$x[length(d$x)-1], by=10000)
+        #y = stats::approx(d$x[-length(d$x)], d.count, xout=x)$y
+        #
+        #l = length(x)
+        #data.frame(density_start=x[-l], density_end=x[-1], density_value=nrow(z)*ifelse(z$break_strand[1]=="+",1,-1) * y[-1])
     })(.)) %>%
     reshape2::dcast(break_chrom+break_exp_condition+density_start+density_end ~ break_strand, value.var="density_value")
+
+
   breaks_ranges_display.control_density = GenomicRanges::makeGRangesFromDataFrame(breaks_display.density %>% dplyr::filter(break_exp_condition=="Control"), start.field="density_start", end.field="density_end", seqnames.field="break_chrom", seqinfo=mm9, strand.field="break_strand", keep.extra.columns=T)
   breaks_ranges_display.sample_density = GenomicRanges::makeGRangesFromDataFrame(breaks_display.density %>% dplyr::filter(break_exp_condition=="Sample"), start.field="density_start", end.field="density_end", seqnames.field="break_chrom", seqinfo=mm9, strand.field="break_strand", keep.extra.columns=T)
 
   max_density = max(abs(c(breaks_display.density$`+`, breaks_display.density$`-`)))
 
+
   axisTrack = GenomeAxisTrack()
-  breaksControlDensityTrack = Gviz::DataTrack(range=breaks_ranges_display.control_density, data=t(cbind(breaks_ranges_display.control_density$`-`, breaks_ranges_display.control_density$`+`)), type="histogram", name="Breaks density (Control)", groups=c("+", "-"), col=c("red","blue"), ylim=c(-max_density, max_density))
-  breaksSampleDensityTrack = Gviz::DataTrack(range=breaks_ranges_display.sample_density, data=t(cbind(breaks_ranges_display.sample_density$`-`, breaks_ranges_display.sample_density$`+`)), type="histogram", name="Breaks density (Control)", groups=c("+", "-"), col=c("red","blue"), ylim=c(-max_density, max_density))
-  genesTrack = GeneRegionTrack(mm9_txdb.gtf, genome="mm9", chromosome=breaks_display$groseq_chrom[1], name="refGene", transcriptAnnotation='gene') # collapseTranscripts = "meta
-  breaksSamplePlusTrack = Gviz::AnnotationTrack(range=breaks_ranges_display.sample_plus, name="+ (Sample)", col="red", stacking = "dense", alpha=0.5, alpha.title=1, stackHeight=1, shape="box", collapse=F, shape="box", col.line="transparent")
-  breaksSampleMinusTrack = Gviz::AnnotationTrack(range=breaks_ranges_display.sample_minus, name="- (Sample)", col="blue", stacking = "dense", alpha=0.5, alpha.title=1, stackHeight=1, shape="box", collapse=F, shape="box", col.line="transparent")
-  breaksControlPlusTrack = Gviz::AnnotationTrack(range=breaks_ranges_display.control_plus, name="+ (Control)", col="red", stacking = "dense", alpha=0.5, alpha.title=1, stackHeight=1, shape="box", collapse=F, shape="box", col.line="transparent")
-  breaksControlMinusTrack = Gviz::AnnotationTrack(range=breaks_ranges_display.control_minus, name="- (Control)", col="blue", stacking = "dense", alpha=0.5, alpha.title=1, stackHeight=1, shape="box", collapse=F, shape="box", col.line="transparent")
-  plotTracks(c(axisTrack, genesTrack, breaksControlDensityTrack, breaksSampleDensityTrack, breaksSamplePlusTrack, breaksSampleMinusTrack), from=min(breaks_display$display_start), to=max(breaks_display$display_end)) #, from=77.55e6, to=77.63e
+  breaksControlDensityTrack = Gviz::DataTrack(range=breaks_ranges_display.control_density, data=t(cbind(breaks_ranges_display.control_density$`-`, breaks_ranges_display.control_density$`+`)), type="histogram", name="Control\njunctions\ndensity", groups=c("+", "-"), col=c("red","blue"), ylim=c(-max_density, max_density), legend=F)
+  breaksSampleDensityTrack = Gviz::DataTrack(range=breaks_ranges_display.sample_density, data=t(cbind(breaks_ranges_display.sample_density$`-`, breaks_ranges_display.sample_density$`+`)), type="histogram", name="Sample\njunctions\ndensity", groups=c("+", "-"), col=c("red","blue"), ylim=c(-max_density, max_density))
+  genesTrack = GeneRegionTrack(mm9_txdb.gtf, genome="mm9", chromosome=breaks_display$groseq_chrom[1], name="refGene", transcriptAnnotation='gene', showAxis=T, col="black")
+  breaksSamplePlusTrack = Gviz::AnnotationTrack(range=breaks_ranges_display.sample_plus, name="A + (Sample)", col="red", stacking = "dense", alpha=0.5, alpha.title=1, stackHeight=1, shape="box", collapse=F, shape="box", col.line="transparent")
+  breaksSampleMinusTrack = Gviz::AnnotationTrack(range=breaks_ranges_display.sample_minus, name="A - (Sample)", col="blue", stacking = "dense", alpha=0.5, alpha.title=1, stackHeight=1, shape="box", collapse=F, shape="box", col.line="transparent")
+  breaksControlPlusTrack = Gviz::AnnotationTrack(range=breaks_ranges_display.control_plus, name="A + (Control)", col="red", stacking = "dense", alpha=0.5, alpha.title=1, stackHeight=1, shape="box", collapse=F, shape="box", col.line="transparent")
+  breaksControlMinusTrack = Gviz::AnnotationTrack(range=breaks_ranges_display.control_minus, name="A - (Control)", col="blue", stacking = "dense", alpha=0.5, alpha.title=1, stackHeight=1, shape="box", collapse=F, shape="box", col.line="transparent")
+  plotTracks(
+    main=stringr::str_glue("{gene} (junctions: {ctrl} in control, {smpl} in sample)", gene=gene_name, ctrl=breaks_count["Control","n"], smpl=breaks_count["Sample","n"]),
+    c(axisTrack, genesTrack, breaksControlDensityTrack, breaksSampleDensityTrack, breaksSamplePlusTrack, breaksSampleMinusTrack),
+    from=min(breaks_display$display_start), to=max(breaks_display$display_end),
+    col.axis=col.axis, fontcolor.title="black", background.title="transparent", fontsize=16, title.width = 1.6, cex.group=1.2)
+  #
+  #availableDisplayPars(genesTrack)
+  #displayPars(breaksSampleDensityTrack)
+  #displayPars(breaksSampleDensityTrack)[grepl("font", names(displayPars(breaksSampleDensityTrack)))]
 }
 
 
-
-mm9 = GenomeInfoDb::Seqinfo(genome="mm9")
-
-# mm9_txdb.ucsc = makeTxDbFromUCSC(genome="mm9", tablename="refGene",)
-mm9_txdb.gtf = GenomicFeatures::makeTxDbFromGFF('data/mm9/mm9.refGene.gtf.gz', format="gtf")
 
 breaksites = readr::read_tsv("data/offtargets_predicted.tsv") %>%
    dplyr::filter(offtarget_mismatches==0) %>%
@@ -96,57 +112,41 @@ groseq2break.map = as.data.frame(IRanges::mergeByOverlaps(groseq_ranges, breaks_
   dplyr::filter(break_chrom==groseq_chrom) %>%
   dplyr::select(groseq_id=groseq_id, break_id=break_id)
 
+rdc = readr::read_tsv("data/rdc_pnas.tsv") %>%
+  dplyr::mutate(rdc_length=rdc_end-rdc_start) %>%
+  tidyr::separate_rows(rdc_gene, sep=" *, *") %>%
+  dplyr::filter(rdc_gene != "--") %>%
+  dplyr::group_by(rdc_gene) %>%
+  dplyr::slice(1) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(rdc_id=1:n())
+
+libsizes = breaks %>%
+  dplyr::group_by(break_sample, break_chrom) %>%
+  dplyr::summarise(library_size=n())
 
 breaks2groseq = breaks %>%
+  dplyr::filter(break_bait_chrom==break_chrom) %>%
+  dplyr::inner_join(libsizes, by=c("break_sample", "break_chrom")) %>%
   dplyr::inner_join(groseq2break.map, by="break_id") %>%
-  dplyr::inner_join(groseq, by="groseq_id")
+  dplyr::inner_join(groseq, by="groseq_id") %>%
+  dplyr::left_join(rdc, by=c("groseq_gene"="rdc_gene")) %>%
+  dplyr::group_by(break_sample, groseq_gene) %>%
+  dplyr::mutate(gene_breaks_count=sum(dplyr::between(break_start, groseq_start, groseq_end))) %>%
+  dplyr::ungroup()
 
-
-
+genes_of_interest = breaks2groseq %>%
+  dplyr::filter(!is.na(rdc_group) & rdc_group==1 & gene_breaks_count>50) %>%
+  dplyr::distinct(groseq_gene) %>%
+  .$groseq_gene
 
 #
 # Visualize with Gviz
 #
-
 mm9 = GenomeInfoDb::Seqinfo(genome="mm9")
 mm9_txdb.gtf = GenomicFeatures::makeTxDbFromGFF('data/mm9/mm9.refGene.gtf.gz', format="gtf")
-plot_breaks(breaks2groseq=breaks2groseq, gene_name="Ctnna2", mm9=mm9, mm9_txdb.gtf=mm9_txdb.gtf)
-plot_breaks(breaks2groseq=breaks2groseq, gene_name="Csmd3", mm9=mm9, mm9_txdb.gtf=mm9_txdb.gtf)
-
-
-
-
-# x = breaks_display %>%
-#   dplyr::mutate(fixed_strand="+", lo=ifelse(break_strand=="+", 0, 2), hi=ifelse(break_strand=="+", 1, 1)) %>%
-#   reshape2::melt(measure.vars=c("lo", "hi")) %>%
-#   reshape2::dcast(break_chrom+break_strand+break_start+break_end ~ break_strand+variable, value.var="value", fun.aggregate=function(z) ifelse(length(z)==0, NA_real_, z))
-# xx = GenomicRanges::makeGRangesFromDataFrame(x, start.field="break_start", end.field="break_end", seqnames.field="break_chrom", seqinfo=mm9, strand.field="fixed_strand", keep.extra.columns=T)
-# breaksTrack = Gviz::DataTrack(range=xx, type="S", data=t(x[, c("-_lo", "-_hi", "+_lo", "+_hi")]), name="+/-", groups=c("-","-", "+","+"), ifelse(x$break_strand=="+", "red", "blue"), alpha=0.5, alpha.title=1)
-# plotTracks(c(axisTrack, genesTrack, breaksDensityTrack,  breaksXTrack), from=min(breaks_display$display_start), to=max(breaks_display$display_end)) #, from=77.55e6, to=77.63e6
-
-
-
-gcTrack = Gviz::UcscTrack(genome="mm9", chromosome=breaks_display$groseq_chrom[1],
-                       track = "GC Percent", table = "gc5Base",
-                       from=min(breaks_display$groseq_start), to=max(breaks_display$groseq_end),
-                       trackType = "DataTrack",
-                       start = "start", end = "end", data = "score",
-                       type = "hist", window = -1, windowSize = 1500,
-                       fill.histogram = "black", col.histogram = "black",
-                       ylim = c(30, 70), name = "GC Percent")
-
-gcContent <- UcscTrack(genome = "mm9", chromosome = breaks_display$groseq_chrom[1],
-                       track = "GC Percent", table = "gc5Base",
-                       from = from, to = to,
-                       trackType = "DataTrack",
-                       start = "start", end = "end", data = "score",
-                       type = "hist", window = -1, windowSize = 1500,
-                       fill.histogram = "black", col.histogram = "black",
-                       ylim = c(30, 70), name = "GC Percent")
-
-plotTracks(c(axisTrack, genesTrack, breaksDensityTrack, breaksPlusTrack, breaksMinusTrack), from=min(breaks_display$groseq_start), to=max(breaks_display$groseq_end)) #, from=77.55e6, to=77.63e6
-
-ranges(genesTrack)$gene
-
-# mcols(genes(mm9_txdb))$gene_id
-# mcols(genes(mm9_txdb))
+pdf("reports/breaks_shift_examples.pdf", width=10, height=6)
+for(gene_name in genes_of_interest) {
+  plot_breaks(breaks2groseq=breaks2groseq, gene_name=gene_name, mm9=mm9, mm9_txdb.gtf=mm9_txdb.gtf)
+}
+dev.off()
