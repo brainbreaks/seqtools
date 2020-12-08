@@ -87,7 +87,8 @@ for(breaks_bed in list.files("data/breaks", pattern="*_APH_no10kb_Merge.bed", fu
 
             res.optics = dbscan::optics(matrix(z$start), minPts=50, eps=1e4)
             res.xi = dbscan::extractXi(res.optics, xi=0.1)
-            #plot(res.xi)
+            plot(res.xi$coredist, type="l")
+            plot(res.xi)
           plot(res.xi$coredist, type="l", ylim=c(0, 100))
             if(is.null(res.xi$clusters_xi)) return(data.frame())
 
