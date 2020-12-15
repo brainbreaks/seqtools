@@ -17,6 +17,26 @@ breaksDensity = function(z, from=1, to=NULL, width=10000, bw=1e3) {
     data.frame(density_chrom=z$chr[1], density_start=z.d$x[-length(z.d$x)], density_end=z.d$x[-1], density_value=d.count)
 }
 
+read.breaks = function(dir) {
+  breaks = data.frame()
+  breaks_cols = cols(break_chrom=col_character(), break_start=col_double(), break_end=col_double(), break_name=col_character(), break_score=col_character(), break_strand=col_character())
+  for(breaks_path in list.files(dir, pattern="*.bed", full.names=T)) {
+      chr = gsub("(chr)([^_]+).*$", "\\L\\1\\2", basename(breaks_path), perl=T, ignore.case=T)
+      condition = ifelse(grepl("DMSO", breaks_path), "Control", "Sample")
+      sample = gsub("\\.bed", "", basename(breaks_path))
+
+
+      x = readr::read_tsv(breaks_path, col_names=names(breaks_cols$cols), col_types=breaks_cols) %>%
+        dplyr::mutate(break_name_copy=break_name) %>%
+        dplyr::mutate(bait_chrom=chr, break_exp_condition=condition, break_sample=sample, break_end=break_start+1) %>%
+        tidyr::extract(break_name_copy, "break_replicate", "M01407:320:000000000-ARNUY:1:([^:]).*")
+      breaks = rbind(breaks, x)
+  }
+  breaks = breaks %>% dplyr::mutate(break_id=1:n())
+
+  breaks
+}
+
 control2sample_correlation = function() {
   breaks = data.frame()
   breaks_cols = cols(break_chrom=col_character(), break_start=col_double(), break_end=col_double(), break_name=col_character(), break_score=col_character(), break_strand=col_character())
@@ -31,6 +51,8 @@ control2sample_correlation = function() {
       breaks = rbind(breaks, x)
   }
   breaks = breaks %>% dplyr::mutate(break_id=1:n())
+  breaks = breaks %>% dplyr::filter(break_chrom==bait_chrom)
+
 
   offtargets_df = readr::read_tsv("data/offtargets_predicted.tsv") %>%
     dplyr::mutate(offtarget_id=1:n()) %>%
@@ -92,19 +114,99 @@ plotRanges <- function(x, xlim=x, main=deparse(substitute(x)), col="black", sep=
     axis(1)
 }
 
-bait_region_size = 4e6
 
-# breaksites_df = readr::read_tsv("data/breaksites_primers.tsv")
-offtargets_df = readr::read_tsv("data/offtargets_predicted.tsv") %>% # Doesn't have position for Chr6
-  dplyr::filter(offtarget_mismatches<5)
+find_clusters = function() {
+  bait_region_size = 2e6
 
-breaksites_df = offtargets_df %>% # Doesn't have position for Chr6
-  dplyr::filter(offtarget_mismatches<5) %>%
-  dplyr::select(bait_chrom, bait_position=offtarget_start)
+  offtargets_df = readr::read_tsv("data/offtargets_predicted.tsv") %>% # Doesn't have position for Chr6
+    dplyr::mutate(offtarget_id=1:n()) %>%
+    dplyr::filter(offtarget_mismatches==0)
+
+  breaks = read.breaks("data/breaks")
+      # %>% dplyr::filter(break_chrom==bait_chrom)
+
+  breaks_ranges = with(breaks,  IRanges::IRanges(start=break_start, end=break_end, break_id=break_id, break_bait_chrom=bait_chrom, break_chrom=break_chrom))
+  offtargets_ranges = with(offtargets_df, IRanges::IRanges(start=offtarget_start-bait_region_size, end=offtarget_end+bait_region_size, offtarget_id=offtarget_id, offtarget_bait_chrom=bait_chrom, offtarget_chrom=offtarget_chrom))
+  breaks2offtargets = as.data.frame(IRanges::mergeByOverlaps(offtargets_ranges, breaks_ranges)) %>%
+    dplyr::filter(offtarget_bait_chrom==break_bait_chrom & break_chrom==offtarget_chrom) %>%
+    dplyr::select(break_id, offtarget_id)
+  breaks = breaks %>%
+    dplyr::mutate(bait_overlap=break_id %in% breaks2offtargets$break_id)
+
+  breaks %>%
+    dplyr::group_by(bait_chrom, break_chrom) %>%
+    dplyr::do((function(z){
+      zz<<-z
+      asdasd()
+      # TODO: estimate minpoints
+      res.optics = dbscan::optics(matrix(z$break_start), minPts=10, eps=1e8)
+      plot(res.optics)
+      res.dbscan = dbscan::extractDBSCAN(res.optics, eps_cl=1e5)
+      plot(res.dbscan)
+      res.dbscan = dbscan::extractXi(res.optics, xi=0.2)
+      plot(res.dbscan)
+
+      z$cluster = res.dbscan$cluster
+      z.cluster = z %>%
+        dplyr::filter(cluster>0) %>%
+        dplyr::group_by(cluster) %>%
+        dplyr::summarise(cluster_start=min(break_start), cluster_end=max(break_end), cluster_width=cluster_end-cluster_start+1) %>%
+        dplyr::arrange(dplyr::desc(cluster_width))
+      z_ranges.cluster = IRanges::IRanges(start=z.cluster$cluster_start, end=z.cluster$cluster_end)
+
+      plotRanges(z_ranges.cluster, xlim=c(0, max(z.cluster$cluster_end)))
+    })(.))
+
+  breaks1 %>%
+    dplyr::group_by(bait_chrom, break_exp_condition) %>%
+    dplyr::summarise(n=n(), n_bait=sum(bait_overlap), n_nonbait=sum(!bait_overlap)) %>%
+    data.frame()
+
+  breaks1 %>%
+    dplyr::group_by(break_chrom, bait_chrom, break_exp_condition) %>%
+    dplyr::summarise(n_bait=sum(bait_overlap), n_nonbait=sum(!bait_overlap))  %>%
+    reshape2::melt(measure.vars=c("n_bait", "n_nonbait")) %>%
+    ggplot() +
+      geom_bar(aes(y=value, x=))
+
+
+
+
+
+  breaks %>%
+    dplyr::group_by(bait_chrom, break_chrom) %>%
+    dplyr::do((function(z){
+      #zz<<-z
+      #asdasd()
+      # TODO: estimate minpoints
+      res.optics = dbscan::optics(matrix(z$break_start), minPts=10, eps=1e8)
+      plot(res.optics)
+      res.dbscan = dbscan::extractDBSCAN(res.optics, eps_cl=1e5)
+    })(.))
+
+
+              z$cluster = res.dbscan$cluster[res.dbscan$order]
+              zf = z %>% dplyr::filter(cluster>0) %>%
+                dplyr::group_by(cluster) %>%
+                dplyr::summarise(start=min(start), end=max(end), chr="chr6")
+              zf.clusters.control = GenomicRanges::makeGRangesFromDataFrame(zf, keep.extra.columns=T)
+              rbind(zf.clusters.control, zf.clusters.sample)
+
+  table(breaks$break_exp_condition , breaks$break_replicate)
+}
+
+
+
+
+
+
+
+
 
 tempdir = "tmp"
 enrichment_outdir = "data/enrichment"
 junctions_cols = c("junction_chrom", "junction_start", "junction_end", "junction_name", "junction_score", "junction_strand")
+
 
 
 dir.create("data/epic2", recursive=T, showWarnings=F)
@@ -160,11 +262,22 @@ for(breaks_bed in list.files("data/breaks", pattern="*_APH_no10kb_Merge.bed", fu
           sample_filtered=sum(break_exp_condition=="Sample" & !(start >= x.offtargets$offtarget_start-3e6 & end<=x.offtargets$offtarget_start+3e6 & x.offtargets$offtarget_chrom==chr))) %>%
       View()
 
+  x = readr::read_tsv(breaks_bed, col_names=names(bed_cols$cols), col_types=bed_cols) %>%
+    dplyr::mutate(break_exp_condition="Sample") %>%
+    tidyr::extract(name, "replicate", "M01407:320:000000000-ARNUY:1:([^:]).*")
 
+  table(x$replicate)
+
+
+
+table(stringr::str_extract_all("M01407:320:000000000-ARNUY:1:", x$name))
     breaks = dplyr::bind_rows(
-      readr::read_tsv(breaks_filtered_bed, col_names=names(bed_cols$cols), col_types=bed_cols) %>% dplyr::mutate(break_exp_condition="Sample"),
-      readr::read_tsv(breaks_control_filtered_bed, col_names=names(bed_cols$cols), col_types=bed_cols) %>% dplyr::mutate(break_exp_condition="Control")) %>%
+      readr::read_tsv(breaks_bed, col_names=names(bed_cols$cols), col_types=bed_cols) %>% dplyr::mutate(break_exp_condition="Sample"),
+      readr::read_tsv(breaks_control_bed, col_names=names(bed_cols$cols), col_types=bed_cols) %>% dplyr::mutate(break_exp_condition="Control")) %>%
       dplyr::mutate(end=start+1)
+
+    breaks$name
+
 
     breaks_clusters = breaks %>%
         dplyr::group_by(break_exp_condition, chr) %>%
@@ -185,15 +298,24 @@ for(breaks_bed in list.files("data/breaks", pattern="*_APH_no10kb_Merge.bed", fu
             #z.dist = as.dist(z.dist_wide)
             #res.optics = dbscan::optics(z.dist, minPts=20, eps=1e8)
 
+            z.max = max(z = breaks %>% dplyr::filter(chr=="chr6") %>% .$start)
             z = breaks %>% dplyr::filter(chr=="chr6" & break_exp_condition=="Control")
             res.optics = dbscan::optics(matrix(z$start), minPts=10, eps=1e8)
             res.dbscan = dbscan::extractDBSCAN(res.optics, eps_cl=1e5)
+
+            z$cluster = res.dbscan$cluster[res.dbscan$order]
+            zf = z %>% dplyr::filter(cluster>0) %>%
+              dplyr::group_by(cluster) %>%
+              dplyr::summarise(start=min(start), end=max(end), chr="chr6")
+            zf.clusters.control = GenomicRanges::makeGRangesFromDataFrame(zf, keep.extra.columns=T)
+            rbind(zf.clusters.control, zf.clusters.sample)
+
+            plotRanges(zf.clusters, xlim=c(0, z.max))
 
 
             z.clusters_ranges_reduced = IRanges::reduce(z.clusters_ranges, min.gapwidth=1, drop.empty.ranges=F, with.revmap=T)
             plotRanges(z.clusters_ranges)
 
-            z$cluster = res.dbscan$cluster[res.dbscan$order]
 
           x = z %>%
             dplyr::arrange(start, cluster)

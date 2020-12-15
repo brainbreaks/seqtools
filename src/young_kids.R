@@ -143,6 +143,7 @@ genes_of_interest = breaks2groseq %>%
 #
 # Visualize with Gviz
 #
+library(BSgenome)
 mm9 = GenomeInfoDb::Seqinfo(genome="mm9")
 mm9_txdb.gtf = GenomicFeatures::makeTxDbFromGFF('data/mm9/mm9.refGene.gtf.gz', format="gtf")
 pdf("reports/breaks_shift_examples.pdf", width=10, height=6)
