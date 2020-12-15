@@ -9,41 +9,32 @@ tlx_cols = cols(
   largegap=col_double(), mapqual=col_double(), breaksite=col_double(), sequential=col_double(), repeatseq=col_double(), duplicate=col_double(), Note=col_character()
 )
 
-junctions = data.frame()
-junctions_ann = data.frame(breaks_file=list.files("data/breaks_tlx", full.names=T, recursive=T, pattern="*.tlx")) %>%
+# Rename Chr14 to Alt289 (Was Alt289 and only PW255 was Alt287)
+junctions_ann.excluded = "PW121|PW246|PW247|PW248|PW249|JK096|JK097|JK098|JK099|JK100|JK101"
+junctions_ann = data.frame(break_file=list.files("data/breaks_tlx", full.names=T, recursive=T, pattern="*.tlx")) %>%
+  dplyr::filter(!grepl(junctions_ann.excluded, break_file)) %>%
    dplyr::mutate(
-     break_bait_chrom = tolower(basename(dirname(breaks_file))),
-     break_condition = ifelse(grepl("DMSO", breaks_file), "Control", "Sample"),
-     break_tech_sample = gsub("_.*", "", basename(breaks_file)),
-     break_bio_sample=gsub(".*(DMSO|APH)_([^_]+).*", "\\2", basename(breaks_file), ignore.case=T, perl=T) #,
-     #break_smth=gsub(".*intersect_(.*)\\.tlx", "\\1", breaks_file, ignore.case=T)
+     break_bait_chrom = tolower(basename(dirname(break_file))),
+     break_condition = ifelse(grepl("DMSO", break_file), "Control", "Sample"),
+     break_tech_sample = gsub("_.*", "", basename(break_file)),
+     break_bio_sample=gsub(".*_((Alt|R)[0-9]+).*", "\\1", basename(break_file), ignore.case=T, perl=T)
    ) %>%
-  dplyr::group_by(break_bait_chrom, break_condition, break_bio_sample) %>%
-  dplyr::mutate(break_tech_replicate=match(break_tech_sample, unique(break_tech_sample))) %>%
   dplyr::group_by(break_bait_chrom, break_condition) %>%
-  dplyr::mutate(break_bio_replicate=match(break_bio_sample, unique(break_bio_sample))) %>%
+  dplyr::mutate(break_replicate=1:n()) %>%
   dplyr::ungroup()
-table(junctions_ann$break_bio_sample, junctions_ann$break_tech_replicate)
-table(bio=junctions_ann$break_bio_replicate, tech=junctions_ann$break_tech_replicate)
 
-junctions_ann%>%
-  dplyr::group_by(break_bait_chrom, break_condition) %>%
-  dplyr::filter(n() > 4) %>%
-  dplyr::ungroup() %>%
-  dplyr::arrange(break_bait_chrom, break_condition, break_bio_sample, break_tech_sample) %>%
-  View()
-for(tlx_path in list.files("data/breaks_tlx", full.names=T, recursive=T, pattern="*.tlx")) {
-  print(tlx_path)
-  tlx.bait_chrom = tolower(basename(dirname(tlx_path)))
-  tlx.condition = ifelse(grepl("DMSO", tlx_path), "Control", "Sample")
-
-  tlx = readr::read_tsv(tlx_path, col_types=tlx_cols)
+junctions = data.frame()
+for(i in 1:nrow(junctions_ann)) {
+  tlx_ann = junctions_ann[i,,drop=F]
+  tlx = cbind(tlx_ann, readr::read_tsv(tlx_ann$break_file, col_types=tlx_cols))
   bed = tlx %>%
-    dplyr::mutate(Score=".", break_strand=ifelse(Strand=="-1", "-", "+")) %>%
+    dplyr::mutate(break_score=".", break_strand=ifelse(Strand=="-1", "-", "+")) %>%
     dplyr::mutate(break_exp_condition=tlx.condition, break_file=tlx_path, break_bait_chrom=tlx.bait_chrom) %>%
-    dplyr::select(break_bait_chrom, break_exp_condition, break_chrom=Rname, break_start=Junction, break_end=Junction, break_name=Qname, break_score=Score, break_strand, break_file)
+    dplyr::select(break_bait_chrom, break_exp_condition, break_chrom=Rname, break_start=Junction, break_end=Junction, break_name=Qname, break_score, break_strand, break_file)
   junctions = rbind(junctions, bed)
 }
+
+dim(junctions)
 
 junctions = junctions %>%
   dplyr::group_by()
