@@ -34,6 +34,32 @@ for(i in 1:nrow(junctions_ann)) {
   junctions = rbind(junctions, bed)
 }
 
+
+
+  junctions %>%
+    dplyr::group_by(break_exp_condition, bait_chrom, break_chrom) %>%
+    dplyr::do((function(z){
+      zz<<-z
+      asdasd()
+      # TODO: estimate minpoints
+      res.optics = dbscan::optics(matrix(z$break_start), minPts=10, eps=1e8)
+      plot(res.optics)
+      res.dbscan = dbscan::extractDBSCAN(res.optics, eps_cl=1e5)
+      plot(res.dbscan)
+      res.dbscan = dbscan::extractXi(res.optics, xi=0.2)
+      plot(res.dbscan)
+
+      z$cluster = res.dbscan$cluster
+      z.cluster = z %>%
+        dplyr::filter(cluster>0) %>%
+        dplyr::group_by(cluster) %>%
+        dplyr::summarise(cluster_start=min(break_start), cluster_end=max(break_end), cluster_width=cluster_end-cluster_start+1) %>%
+        dplyr::arrange(dplyr::desc(cluster_width))
+      z_ranges.cluster = IRanges::IRanges(start=z.cluster$cluster_start, end=z.cluster$cluster_end)
+
+      plotRanges(z_ranges.cluster, xlim=c(0, max(z.cluster$cluster_end)))
+    })(.))
+
 dim(junctions)
 
 junctions = junctions %>%
