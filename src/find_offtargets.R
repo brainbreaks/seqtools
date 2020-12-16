@@ -13,7 +13,12 @@ library(Biostrings)
 library(BSgenome)
 
 
+
 analyze.primers_in_mm9 = function() {
+  chromosomes_map_df = readr::read_tsv("data/mm9_chromosomes_synonyms.tsv")
+  chromosomes_map = chromosomes_map_df$chrom
+  names(chromosomes_map) = chromosomes_map_df$chrom_synonym
+
   genome_mm9 = Biostrings::readDNAStringSet("data/mm9/mm9.fa.gz", "fasta")
   validated_offtargets = readr::read_tsv("data/offtargets_computational_wei.tsv") %>%
     dplyr::mutate(
@@ -115,38 +120,48 @@ analyze.primers_in_mm9 = function() {
     dplyr::select(bait_name, bait_chrom, offtarget_chrom=primer_alignment_chrom, offtarget_strand=primer_alignment_strand, offtarget_start=primer_alignment_start, offtarget_end=primer_alignment_end, offtarget_mismatches=primer_alignment_mismatches, offtarget_primer_sequence=primer_sequence, offtarget_sequence=primer_alignment_sequence) %>%
     readr::write_tsv(file="data/offtargets_predicted.tsv")
 
-
   pdf("reports/primers_offtargets.pdf", width=10, height=6)
-
+  primers_targets = readr::read_tsv("data/offtargets_predicted.tsv") %>%
+    dplyr::mutate(primer_name="sgRNA") %>%
+    dplyr::mutate(bait_chrom=chromosomes_map[bait_chrom], offtarget_chrom=chromosomes_map[offtarget_chrom])
 
   primers_targets.ggplot = primers_targets %>%
-    dplyr::mutate(primer_alignment_chrom=factor(primer_alignment_chrom)) %>%
-    dplyr::filter(primer_alignment_mismatches<=5)
+    dplyr::mutate(offtarget_strand=factor(offtarget_strand)) %>%
+    dplyr::mutate(offtarget_chrom=factor(offtarget_chrom)) %>%
+    dplyr::filter(offtarget_mismatches<=5)
 
   primers_targets.ggplot_sum = primers_targets.ggplot %>%
-    dplyr::group_by(bait_name, primer_alignment_mismatches) %>%
+    dplyr::group_by(bait_name, offtarget_mismatches) %>%
     dplyr::summarise(mismatches=n()) %>%
-    reshape2::dcast(bait_name ~ primer_alignment_mismatches, value.var="mismatches") %>%
+    reshape2::dcast(bait_name ~ offtarget_mismatches, value.var="mismatches") %>%
     replace(is.na(.), 0)
 
   ggplot(primers_targets) +
-    geom_histogram(aes(primer_alignment_mismatches, fill=primer_name), bins=10) +
+    geom_histogram(aes(offtarget_mismatches, fill=primer_name), bins=10) +
     labs(x="Error rate") +
     theme_bw()
 
   ggplot(primers_targets.ggplot) +
-      ggridges::geom_density_ridges(aes(x=primer_alignment_start/1e6, y=primer_alignment_chrom, height=..count.., color=primer_alignment_mismatches==0), stat = "binline", bins=1000, scale=1.5, draw_baseline=F) +
-      facet_wrap(~bait_chrom, ncol=3)
-
-  ggplot(primers_targets.ggplot) +
-    geom_segment(aes(x=primer_alignment_start/1e6, xend=primer_alignment_start/1e6, y=as.numeric(primer_alignment_chrom)-0.2*(1-primer_alignment_mismatches_rate), yend=as.numeric(primer_alignment_chrom)+0.2*(1-primer_alignment_mismatches_rate), color=bait_chrom, size=(1-primer_alignment_mismatches_rate)*0.5)) +
+    geom_segment(aes(x=offtarget_start/1e6, xend=offtarget_start/1e6, y=as.numeric(offtarget_chrom)-0.2*(1-offtarget_mismatches), yend=as.numeric(offtarget_chrom)+0.2*(1-offtarget_mismatches/20), color=bait_chrom, size=(1-offtarget_mismatches/20)*0.5)) +
     scale_size_identity() +
     labs(color="Bait chromosome", y="Chromosome", x="Chromosome position") +
-    scale_y_continuous(labels=levels(primers_targets.ggplot$primer_alignment_chrom), breaks=1:nlevels(primers_targets.ggplot$primer_alignment_chrom)) +
+    scale_y_continuous(labels=levels(primers_targets.ggplot$offtarget_chrom), breaks=1:nlevels(primers_targets.ggplot$offtarget_chrom)) +
     theme_bw() +
     ggpmisc::geom_table(aes(x=x, y=y, label=tb), data=tibble(y=2, x=200, tb=list(primers_targets.ggplot_sum)), size=2)
 
+  offtargets2breaksites_primers = readr::read_tsv("data/breaksites_primers.tsv") %>%
+    dplyr::inner_join(primers_targets, by=c("bait_chrom")) %>%
+    dplyr::filter(offtarget_mismatches <= 0)
+  ggplot(offtargets2breaksites_primers) +
+    geom_point(aes(x=offtarget_start, y=primer_start)) +
+    ggrepel::geom_text_repel(aes(x=offtarget_start, y=primer_start, label=bait_chrom))
 
+  breaksites2offtargets = readr::read_tsv("data/breaksites.tsv") %>%
+    dplyr::inner_join(primers_targets, by=c("breaksite_chrom"="bait_chrom")) %>%
+    dplyr::filter(offtarget_mismatches<=0)
+  ggplot(breaksites2offtargets) +
+    geom_point(aes(x=offtarget_start, y=breaksite_pos)) +
+    ggrepel::geom_text_repel(aes(x=offtarget_start, y=breaksite_pos, label=breaksite_chrom))
 
   dev.off()
 
