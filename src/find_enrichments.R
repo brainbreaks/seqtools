@@ -68,7 +68,6 @@ control2sample_correlation = function() {
   breaks.densities %>%
     dplyr::filter(dplyr::between(break_start, 57209692 - 3e6, 57209692+3e6) & bait_chrom=="chr13" & break_chrom=="chr13" )
   breaks.densities %>% dplyr::filter(bait_chrom=="chr13" & density_chrom=="chr13") %>% dplyr::arrange(dplyr::desc(Sample)) %>% dplyr::slice(1)
-  offtargets_df %>% dplyr::filter(bait_chrom=="chr13")
 
   breaks.densities = breaks %>%
     dplyr::filter(!(break_chrom %in% c("chrM", "chrX", "chrY"))) %>%
