@@ -31,10 +31,9 @@ tlx_cols = cols(
   largegap=col_double(), mapqual=col_double(), breaksite=col_double(), sequential=col_double(), repeatseq=col_double(), duplicate=col_double(), Note=col_character()
 )
 
-peak_method, bait_chrom, peak_chrom, peak_start, peak_end, peak_score
 macs2_cols = cols(
   peak_chrom=col_character(), peak_start=col_double(), peak_end=col_double(), peak_length=col_double(), peak_abs_summit=col_double(),
-  peak_pileup=col_double(), `-log10(pvalue)`=col_double(), fold_enrichment=col_double(), `-log10(qvalue)`=col_double(), name=col_character()
+  peak_pileup=col_double(), peak_pvalue=col_double(), peak_fc=col_double(), peak_score=col_double(), peak_name=col_character()
 )
 
 # Rename Chr14 to Alt289 (Was Alt289 and only PW255 was Alt287)
@@ -98,74 +97,99 @@ ggplot() +
   facet_wrap(~break_bait_chrom, scale="free_y", ncol=2)
 dev.off()
 
-junctions_df %>%
-  dplyr::group_by(break_file) %>%
-  dplyr::summarise(is_near_bait=sum(is_near_bait), is_far_bait=sum(!is_near_bait)) %>%
-  data.frame()
-dim(junctions_df)
-
-
-islands = data.frame()
-junctions_df %>%
-  dplyr::group_by(break_bait_chrom, break_chrom) %>%
-  dplyr::do((function(z){
+junctions_df.f = junctions_df %>% dplyr::filter(!grepl("chrX|chrY", break_bait_chrom))
+junctions_g = junctions_df %>%
+  dplyr::arrange(break_start, break_end) %>%
+  dplyr::group_by(break_bait_chrom, break_exp_condition, break_chrom)
+all_islands = junctions_g %>% dplyr::do((function(z, g){
+    gg <<- g
+    #z = junctions_df %>% dplyr::filter(break_bait_chrom=="chr6", break_chrom=="chr1")
     zz<<-z
-    asdasd()
 
-    # DBSCAN
-    dbscan_params = list(minPts=20, eps_cl=1e5)
-    res.optics = dbscan::optics(matrix(z$break_start), minPts=dbscan_params$minPts, eps=1e6)
-    res.dbscan = dbscan::extractDBSCAN(res.optics, eps_cl=dbscan_params$eps_cl)
-    #plot(res.dbscan, ylim=c(0,1e5))
+    writeLines(paste0(g, "=", z[1,g], collapse=" "))
 
-    dbscan_output = z %>%
-      dplyr::mutate(cluster=res.dbscan$cluster) %>%
-      dplyr::filter(cluster>0) %>%
-      dplyr::group_by(cluster) %>%
-      dplyr::summarise(peak_method="dbscan", bait_chrom=z$break_bait_chrom[1], peak_chrom=z$break_chrom[1], peak_start=min(break_start), peak_end=max(break_end), peak_score=0) %>%
-      dplyr::select(-cluster)
-    islands = rbind(islands, dbscan_output)
-
+    ##################################
+    # Create temporary files
+    ##################################
     path_bed = tempfile()
     readr::write_tsv(z %>% dplyr::select(break_chrom, break_start, break_end, break_name, break_score, break_strand), path_bed, col_names=F)
 
     path_bed_far = tempfile()
     readr::write_tsv(z %>% dplyr::filter(!is_near_bait) %>% dplyr::select(break_chrom, break_start, break_end, break_name, break_score, break_strand), path_bed_far, col_names=F)
 
+    islands = data.frame()
 
-    # SICER
-    sicer_params = list(window=30000, gap=90000, e_value=0.1, fdr=0.01)
-    sicer_control_results.cols = cols("peak_chrom"=col_character(), peak_start=col_double(), peak_end=col_double(), peak_score = col_double())
-    sicer_cmd = stringr::str_glue("sh SICER1.1/SICER/SICER-rb.sh {input_dir} {input} {output_dir} {genome} {format(r_threshold, scientific=F)} {format(window_size, scientific=F)} {format(fragment_size, scientific=F)} {format(fraction, scientific=F)} {format(gap_size, scientific=F)} {format(e_value, scientific=F)}",
-                     input_dir=dirname(path_bed_far), input=basename(path_bed_far), output_dir="data/sicer1",
-                     genome="mm9", fraction=0.74, r_threshold=5, window_size=sicer_params["window"], fragment_size=1, gap_size=sicer_params["gap"], e_value=sicer_params["e_value"]
-    )
-    system(sicer_cmd)
-    sicer_output_path = stringr::str_glue("data/sicer1/{sample}-W{format(window, scientific=F)}-G{format(gap, scientific=F)}-E{format(e_value, scientific=F)}.scoreisland", window=sicer_params["window"], gap=sicer_params["gap"], e_value=sicer_params["e_value"], sample=gsub("\\.bed$", "", basename(path_bed_far)))
-    sicer_output = readr::read_tsv(sicer_output_path, col_names=names(sicer_control_results.cols$cols), col_types=sicer_control_results.cols) %>%
-      dplyr::mutate(bait_chrom=z$break_bait_chrom[1], peak_method="sicer") %>%
-      dplyr::select(peak_method, bait_chrom, peak_chrom, peak_start, peak_end, peak_score)
-    islands = rbind(islands, sicer_output)
+    ##################################
+    # DBSCAN
+    ##################################
+    if(F) {
+      writeLines("DBSCAN")
+      dbscan_params = list(minPts=20, eps_cl=1e5)
+      res.optics = dbscan::optics(matrix(z$break_start), minPts=dbscan_params$minPts, eps=2e7)
+      res.dbscan = dbscan::extractDBSCAN(res.optics, eps_cl=dbscan_params$eps_cl)
+      #plot(res.dbscan)
+      res.dbscan = dbscan::dbscan(matrix(z$break_start), minPts=dbscan_params$minPts, eps=dbscan_params$eps_cl)
+      dbscan_output = z %>%
+        dplyr::mutate(cluster=res.dbscan$cluster) %>%
+        dplyr::filter(cluster>0) %>%
+        dplyr::group_by(cluster) %>%
+        dplyr::summarise(peak_method="dbscan", peak_start=min(break_start), peak_end=max(break_end), peak_score=0) %>%
+        dplyr::select(-cluster)
+      islands = rbind(islands, dbscan_output)
+    }
 
+    if(F) {
+      ##################################
+      # SICER
+      ##################################
+      writeLines("SICER")
+      sicer_params = list(window=10000, gap=30000, e_value=0.1, fdr=0.01)
+      sicer_control_results.cols = cols("peak_chrom"=col_character(), peak_start=col_double(), peak_end=col_double(), peak_score = col_double())
+      sicer_cmd = stringr::str_glue("sh SICER1.1/SICER/SICER-rb.sh {input_dir} {input} {output_dir} {genome} {format(r_threshold, scientific=F)} {format(window_size, scientific=F)} {format(fragment_size, scientific=F)} {format(fraction, scientific=F)} {format(gap_size, scientific=F)} {format(e_value, scientific=F)}",
+                       input_dir=dirname(path_bed_far), input=basename(path_bed_far), output_dir="data/sicer1",
+                       genome="mm9", fraction=0.74, r_threshold=5, window_size=sicer_params["window"], fragment_size=20, gap_size=sicer_params["gap"], e_value=sicer_params["e_value"]
+      )
+      system(sicer_cmd)
+      sicer_output_path = stringr::str_glue("data/sicer1/{sample}-W{format(window, scientific=F)}-G{format(gap, scientific=F)}-E{format(e_value, scientific=F)}.scoreisland", window=sicer_params["window"], gap=sicer_params["gap"], e_value=sicer_params["e_value"], sample=gsub("\\.bed$", "", basename(path_bed_far)))
+      if(file.exists(sicer_output_path) && file.size(sicer_output_path)>0) {
+        sicer_output = readr::read_tsv(sicer_output_path, col_names=names(sicer_control_results.cols$cols), col_types=sicer_control_results.cols) %>%
+          dplyr::mutate(peak_method="sicer") %>%
+          dplyr::select(peak_method, peak_start, peak_end, peak_score)
+        islands = dplyr::bind_rows(islands, sicer_output)
+      }
+    }
+
+    ##################################
     # MACS2
+    ##################################
+    writeLines("MACS2")
     macs2_output_path = tempfile(tmpdir="data/macs2")
-    #writeLines("", con=macs2_output_path)
-    #macs2_output_path = tools::file_path_as_absolute(macs2_output_path)
-    macs2_params = list(extsize=2000, qvalue=0.01, llocal=1e6, shift=1e4)
-    macs2_cmd = stringr::str_glue("macs2 callpeak -t {input} -f BED -g mm --keep-dup all -n {output} --outdir {outdir} --nomodel --extsize {extsize} -q {qvalue} --shift {format(shift, scientific=F)} --llocal {format(llocal, scientific=F)}",
+    macs2_params = list(extsize=1e4, qvalue=0.01, llocal=1e6, shift=5e3)
+    macs2_cmd = stringr::str_glue("macs2 callpeak -t {input} -f BED -g mm --keep-dup all -n {output} --outdir {outdir} --nomodel --extsize {extsize} -q {qvalue} --shift {format(shift, scientific=F)} --llocal {format(llocal, scientific=F)}  2>/dev/null",
       input=path_bed_far, outdir=dirname(macs2_output_path), output=basename(macs2_output_path), extsize=macs2_params$extsize, qvalue=macs2_params$qvalue, llocal=macs2_params$llocal, shift=macs2_params$shift)
     system(macs2_cmd)
-    macs2_output = readr::read_tsv(macs2_output_path, col_names=names(macs2_cols$cols), comment="#", skip=22, col_types=macs2_cols) %>%
-      dplyr::mutate(bait_chrom=bait_chrom)
-    results = dplyr::bind_rows(results, control_enrichment_df)
+    macs2_output = readr::read_tsv(paste0(macs2_output_path, "_peaks.xls"), col_names=names(macs2_cols$cols), comment="#", skip=23, col_types=macs2_cols) %>%
+      dplyr::mutate(peak_method="macs2") %>%
+      dplyr::select(peak_method, peak_start, peak_end, peak_score)
+    islands = dplyr::bind_rows(islands, macs2_output)
 
     #z_ranges.cluster = IRanges::IRanges(start=z.cluster$cluster_start, end=z.cluster$cluster_end)
     #plotRanges(z_ranges.cluster, xlim=c(0, max(z.cluster$cluster_end)))
-  })(.))
+    islands %>% dplyr::bind_cols(z[1,g, drop=F])
+  })(., group_vars(junctions_g)))
 
-sicer =
+plot(density(all_islands.f$peak_end-all_islands.f$peak_start))
 
-dim(junctions)
+all_islands.f = all_islands %>% dplyr::filter(break_bait_chrom!=break_chrom) %>% dplyr::mutate(i=1:n())
+all_islands_cross = all_islands.f %>%
+  dplyr::inner_join(all_islands.f, by=setdiff(c("peak_method", group_vars(junctions_g)), "break_bait_chrom")) %>%
+  #dplyr::filter(i.y>i.x) %>%
+  dplyr::filter(break_bait_chrom.x!=break_bait_chrom.y) %>%
+  dplyr::filter(dplyr::between(peak_start.x, peak_start.y, peak_end.y) | dplyr::between(peak_start.y, peak_start.x, peak_end.x))
 
-junctions = junctions %>%
-  dplyr::group_by()
+  # +
+
+ggplot() +
+  ggridges::geom_density_ridges(aes(y=break_chrom, x=peak_start.x, color=break_bait_chrom.x), bandwidth=1e5, data=all_islands_cross, alpha=0.1) +
+  geom_point(aes(y=bait_chrom, x=offtarget_start, color=bait_chrom), data=offtargets_df, size=5, alpha=0.5) +
+  facet_wrap(~break_exp_condition)
