@@ -104,25 +104,28 @@ dev.off()
 #
 junctions_df %>%
   dplyr::filter(!is_near_bait & break_bait_chrom != break_chrom) %>%
-  dplyr::group_by(break_exp_condition, break_strand) %>%
+  dplyr::group_by(break_exp_condition) %>%
   dplyr::do((function(z){
     zz<<-z
-    #ensemble_bed = paste0("data/breakensembl/", z$break_exp_condition[1], "_", ifelse(z$break_strand[1]=="+", "plus", "minus"), ".bed")
-    #readr::write_tsv(z %>% dplyr::select(break_chrom, break_start, break_end, break_name, break_score, break_strand), ensemble_bed, col_names=F)
-    #macs2_pileup_cmd = stringr::str_glue("macs2 pileup -i {input} -f BED -B --extsize {format(extsize, scientific=F)} -o {output}",
-    #  input=ensemble_bed, output=gsub("bed$", "bdg", ensemble_bed), extsize=1e3/2)
-    #system(macs2_pileup_cmd)
 
-    path_bed = tempfile()
-    readr::write_tsv(z %>% dplyr::select(break_chrom, break_start, break_end, break_name, break_score, break_strand), path_bed, col_names=F)
+    bed = list(
+      "all" = z,
+      "plus" = z %>% dplyr::filter(break_strand=="+"),
+      "minus" = z %>% dplyr::filter(break_strand=="-")
+    )
+    bed_path = sapply(names(bed), function(s) stringr::str_glue("data/breakensembl/{exp}_{strand}.bed", exp=bed[[s]]$break_exp_condition[1], strand=s))
+    o = sapply(names(bed), function(s) readr::write_tsv(bed[[s]] %>% dplyr::select(break_chrom, break_start, break_end, break_name, break_score, break_strand), bed_path[[s]], col_names=F))
+
+    macs2_pileup_cmd = sapply(names(bed), function(s) stringr::str_glue("macs2 pileup -i {input} -f BED --extsize {format(extsize, scientific=F)} -o {output}",
+      input=ensemble_bed, output=paste0(bed_path[[s]], ".bdg"), extsize=1e4))
+    o = lapply(macs2_pileup_cmd, system)
 
     macs2_output_path = tempfile(tmpdir="data/macs2")
     macs2_params = list(extsize=20, qvalue=0.01, llocal=3e4, shift=5e4)
     macs2_cmd = stringr::str_glue("macs2 callpeak -t {input} -f BED -g mm --keep-dup all -n {output} -B --outdir {outdir} --nomodel --extsize {extsize} -q {qvalue} --llocal {format(llocal, scientific=F)} {pipe}",
-      input=path_bed,
+      input=bed_path[["all"]],
       outdir=dirname(macs2_output_path),
       output=basename(macs2_output_path),
-      pileup=gsub("bed$", "bdg", basename(macs2_output_path)),
       extsize=macs2_params$extsize,
       qvalue=macs2_params$qvalue,
       llocal=macs2_params$llocal,
