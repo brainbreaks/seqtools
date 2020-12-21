@@ -36,6 +36,8 @@ macs2_cols = cols(
   peak_pileup=col_double(), peak_pvalue=col_double(), peak_fc=col_double(), peak_score=col_double(), peak_name=col_character()
 )
 
+bed_cols = cols(chrom=col_character(), start=col_double(), end=col_double(), name=col_character(), score=col_character(), strand=col_character())
+
 # Rename Chr14 to Alt289 (Was Alt289 and only PW255 was Alt287)
 junctions_ann.excluded = "PW121|PW246|PW247|PW248|PW249|JK096|JK097|JK098|JK099|JK100|JK101"
 junctions_ann.excluded = "NO FILTER"
@@ -97,13 +99,62 @@ ggplot() +
   facet_wrap(~break_bait_chrom, scale="free_y", ncol=2)
 dev.off()
 
+#
+# Create a bed file where all breaks from outside bait region are put together
+#
+junctions_df %>%
+  dplyr::filter(!is_near_bait & break_bait_chrom != break_chrom) %>%
+  dplyr::group_by(break_exp_condition, break_strand) %>%
+  dplyr::do((function(z){
+    zz<<-z
+    #ensemble_bed = paste0("data/breakensembl/", z$break_exp_condition[1], "_", ifelse(z$break_strand[1]=="+", "plus", "minus"), ".bed")
+    #readr::write_tsv(z %>% dplyr::select(break_chrom, break_start, break_end, break_name, break_score, break_strand), ensemble_bed, col_names=F)
+    #macs2_pileup_cmd = stringr::str_glue("macs2 pileup -i {input} -f BED -B --extsize {format(extsize, scientific=F)} -o {output}",
+    #  input=ensemble_bed, output=gsub("bed$", "bdg", ensemble_bed), extsize=1e3/2)
+    #system(macs2_pileup_cmd)
+
+    path_bed = tempfile()
+    readr::write_tsv(z %>% dplyr::select(break_chrom, break_start, break_end, break_name, break_score, break_strand), path_bed, col_names=F)
+
+    macs2_output_path = tempfile(tmpdir="data/macs2")
+    macs2_params = list(extsize=20, qvalue=0.01, llocal=3e4, shift=5e4)
+    macs2_cmd = stringr::str_glue("macs2 callpeak -t {input} -f BED -g mm --keep-dup all -n {output} -B --outdir {outdir} --nomodel --extsize {extsize} -q {qvalue} --llocal {format(llocal, scientific=F)} {pipe}",
+      input=path_bed,
+      outdir=dirname(macs2_output_path),
+      output=basename(macs2_output_path),
+      pileup=gsub("bed$", "bdg", basename(macs2_output_path)),
+      extsize=macs2_params$extsize,
+      qvalue=macs2_params$qvalue,
+      llocal=macs2_params$llocal,
+      pipe="", pipe2="2>/dev/null"
+    )
+    system(macs2_cmd)
+
+    data.frame()
+  })(.))
+
+x = junctions_df %>%
+  dplyr::filter(!is_near_bait & break_bait_chrom != break_chrom)
+table(x$break_chrom)
+
+
+    ##################################
+    # Create temporary files
+    ##################################
+    path_bed = tempfile()
+    readr::write_tsv(z %>% dplyr::select(break_chrom, break_start, break_end, break_name, break_score, break_strand), path_bed, col_names=F)
+
+    path_bed_far = tempfile()
+    readr::write_tsv(z %>% dplyr::filter(!is_near_bait) %>% dplyr::select(break_chrom, break_start, break_end, break_name, break_score, break_strand), path_bed_far, col_names=F)
+
 junctions_df.f = junctions_df %>% dplyr::filter(!grepl("chrX|chrY", break_bait_chrom))
 junctions_g = junctions_df %>%
   dplyr::arrange(break_start, break_end) %>%
   dplyr::group_by(break_bait_chrom, break_exp_condition, break_chrom)
 all_islands = junctions_g %>% dplyr::do((function(z, g){
     gg <<- g
-    #z = junctions_df %>% dplyr::filter(break_bait_chrom=="chr6", break_chrom=="chr1")
+    g = c("break_bait_chrom", "break_exp_condition", "break_chrom")
+    z = junctions_df %>% dplyr::filter(break_bait_chrom=="chr15" & break_chrom=="chr15" & break_exp_condition=="Sample")
     zz<<-z
 
     writeLines(paste0(g, "=", z[1,g], collapse=" "))
@@ -164,14 +215,37 @@ all_islands = junctions_g %>% dplyr::do((function(z, g){
     ##################################
     writeLines("MACS2")
     macs2_output_path = tempfile(tmpdir="data/macs2")
-    macs2_params = list(extsize=1e4, qvalue=0.01, llocal=1e6, shift=5e3)
+    macs2_params = list(extsize=20, qvalue=0.01, llocal=3e4, shift=5e4)
+    #macs2_params$llocal = macs2_params$extsize*5
+    #macs2_params$shift = macs2_params$extsize/2
     macs2_cmd = stringr::str_glue("macs2 callpeak -t {input} -f BED -g mm --keep-dup all -n {output} --outdir {outdir} --nomodel --extsize {extsize} -q {qvalue} --shift {format(shift, scientific=F)} --llocal {format(llocal, scientific=F)}  2>/dev/null",
       input=path_bed_far, outdir=dirname(macs2_output_path), output=basename(macs2_output_path), extsize=macs2_params$extsize, qvalue=macs2_params$qvalue, llocal=macs2_params$llocal, shift=macs2_params$shift)
     system(macs2_cmd)
+
+    macs2_pileup_cmd = stringr::str_glue("macs2 pileup -i {input} -f BED --extsize {format(extsize, scientific=F)} --outdir {outdir} -o {output}",
+      input=path_bed, outdir=dirname(macs2_output_path), output=paste0(basename(macs2_output_path), ".bdg"), extsize=1e4)
+    system(macs2_pileup_cmd)
+
+    readr::write_tsv(junctions_df %>% dplyr::filter(break_bait_chrom=="chr15" & break_exp_condition=="Sample") %>% dplyr::select(break_chrom, break_start, break_end, break_name, break_score, break_strand), path_bed, col_names=F)
+    macs2_predictd_cmd = stringr::str_glue("macs2 predictd -i {input} -g mm -m 1 50000 --bw 50",
+      input=path_bed_far)
+    system(macs2_predictd_cmd)
+
+
+
     macs2_output = readr::read_tsv(paste0(macs2_output_path, "_peaks.xls"), col_names=names(macs2_cols$cols), comment="#", skip=23, col_types=macs2_cols) %>%
       dplyr::mutate(peak_method="macs2") %>%
-      dplyr::select(peak_method, peak_start, peak_end, peak_score)
+      dplyr::select(peak_method, peak_chrom, peak_start, peak_end, peak_score)
     islands = dplyr::bind_rows(islands, macs2_output)
+
+    print(macs2_output_path)
+    breaks = readr::read_tsv(path_bed_far, col_names=names(bed_cols$cols), col_types=bed_cols)
+    breaks %>% dplyr::filter(dplyr::between(start, 57585942, 57670940))
+    readr::read_tsv(paste0(macs2_output_path, "_peaks.xls"), col_names=names(macs2_cols$cols), comment="#", skip=23, col_types=macs2_cols) %>%
+        dplyr::mutate(peak_strand="+") %>%
+        dplyr::select(peak_chrom, peak_start, peak_end,  peak_name, peak_score, peak_strand) %>%
+        readr::write_tsv(paste0(macs2_output_path, "_peaks.bed"), col_names=F)
+
 
     #z_ranges.cluster = IRanges::IRanges(start=z.cluster$cluster_start, end=z.cluster$cluster_end)
     #plotRanges(z_ranges.cluster, xlim=c(0, max(z.cluster$cluster_end)))
