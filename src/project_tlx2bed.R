@@ -22,15 +22,62 @@ call_peaks = function(z.sample, macs2_params, z.control=NULL) {
   z.control = z.control %>% dplyr::mutate(break_name=stringr::str_glue("{bait}_{name}", bait=break_bait_chrom, name=break_name))
   readr::write_tsv(z.control %>% dplyr::select(break_chrom, break_start, break_end, break_name, break_score, break_strand), control_bed_path, col_names=F)
 
+
+
+
+#%>%
+#    GenomicRanges::makeGRangesFromDataFrame(keep.extra.columns=T)
+#  rtracklayer::export.bedGraph(bins, macs2_slocal_path)
+
+  bins_df = as.data.frame(bins)
+  x = bins_df %>%
+    dplyr::group_by(seqnames) %>%
+    dplyr::summarize(coverage=quantile(coverage, 0.5))
+  plot(x)
+
+
   # D background
   macs2_dlocal_path = "data/macs2/Control_dlocal.bdg"
   system(stringr::str_glue("macs2 pileup -i {input} -f BED -B --extsize {format(extsize, scientific=F)} -o {output}", input=control_bed_path, output=macs2_dlocal_path, extsize=macs2_params$extsize/2))
 
   # slocal background
-  macs2_slocal_path = "data/macs2/Control_slocal.bdg"
-  system(stringr::str_glue("macs2 pileup -i {input} -f BED -B --extsize {format(extsize, scientific=F)} -o {output}", input=control_bed_path, output=macs2_slocal_path, extsize=macs2_params$slocal/2))
   macs2_slocal_norm_path = "data/macs2/Control_slocal_norm.bdg"
-  system(stringr::str_glue("macs2 bdgopt -i {input} -m multiply -p {norm} -o {output}", input=macs2_slocal_path, output=macs2_slocal_norm_path, norm=macs2_params$extsize / macs2_params$slocal))
+  macs2_slocal_path = "data/macs2/Control_slocal.bdg"
+  #system(stringr::str_glue("macs2 pileup -i {input} -f BED -B --extsize {format(extsize, scientific=F)} -o {output}", input=control_bed_path, output=macs2_slocal_path, extsize=macs2_params$slocal/2))
+  #system(stringr::str_glue("macs2 bdgopt -i {input} -m multiply -p {norm} -o {output}", input=macs2_slocal_path, output=macs2_slocal_norm_path, norm=macs2_params$extsize / macs2_params$slocal))
+  reads = rtracklayer::import.bed(sample_bed_path)
+  binsize = 1e5
+  extend = 1e5
+  reads.extended = GenomicRanges::resize(reads, width=extend, fix="center")
+  bins = unlist(tileGenome(mm9, tilewidth=binsize))
+  bins$coverage = GenomicRanges::countOverlaps(bins, reads.extended)
+  bins = as.data.frame(bins) %>%
+    dplyr::arrange(seqnames, start) %>%
+    dplyr::group_by(seqnames) %>%
+    dplyr::mutate(coverage=zoo::rollapply(coverage, width=4e6/binsize, partial=T, FUN=quantile, 0.1, na.rm=T)) %>%
+    dplyr::ungroup() %>%
+    dplyr::mutate(coverage=zoo::na.fill(coverage, "extend")) %>%
+    dplyr::select(seqnames, start, end, coverage)
+  plot(as.data.frame(bins)$coverage, type="l")
+
+  x5 = bins %>%
+    dplyr::group_by(seqnames) %>%
+    dplyr::summarise(coverage=max(coverage))
+
+  plot(x4$coverage, x6$coverage)
+  abline(a=0, b=0.01)
+
+  plot(x5$coverage, x6$coverage)
+  abline(a=0, b=1)
+
+  plot(x4$coverage, x5$coverage)
+  abline(a=0, b=1)
+
+
+  macs2_params$extsize / macs2_params$slocal
+  readr::write_tsv(bins, file="data/macs2/coverage.bdg", col_names=F)
+
+
 
   # llocal background
   macs2_llocal_path = "data/macs2/Control_llocal.bdg"
@@ -41,6 +88,9 @@ call_peaks = function(z.sample, macs2_params, z.control=NULL) {
   #T
 
   # glocal background
+  #BiocManager::install("BSgenome.Mmusculus.UCSC.mm9")
+  library(BSgenome)
+  options("UCSC.goldenPath.url"="https://hgdownload.cse.ucsc.edu/goldenPath")
   mm9 = GenomeInfoDb::Seqinfo(genome="mm9")
   mm9_size = sum(mm9@seqlengths)
   mm9_effective_size=0.74 * mm9_size
@@ -192,6 +242,10 @@ read_breaks_experiments = function(path, chromosomes_map) {
 }
 
 main = function() {
+  chromosomes_map_df = readr::read_tsv("data/mm9_chromosomes_synonyms.tsv")
+  chromosomes_map = chromosomes_map_df$chrom
+  names(chromosomes_map) = chromosomes_map_df$chrom_synonym
+
   # Read offtargets
   offtargets_all_df = readr::read_tsv("data/offtargets_predicted.tsv") %>%
     dplyr::mutate(offtarget_id=1:n())
@@ -207,11 +261,6 @@ main = function() {
     dplyr::mutate(
       offtarget_start=ifelse(bait_chrom=="chr15", 61818880, offtarget_start),
       offtarget_end=ifelse(bait_chrom=="chr15", 61818881, offtarget_end))
-
-
-  chromosomes_map_df = readr::read_tsv("data/mm9_chromosomes_synonyms.tsv")
-  chromosomes_map = chromosomes_map_df$chrom
-  names(chromosomes_map) = chromosomes_map_df$chrom_synonym
 
   bed_cols = cols(chrom=col_character(), start=col_double(), end=col_double(), name=col_character(), score=col_character(), strand=col_character())
 
@@ -236,9 +285,10 @@ main = function() {
 
 
   macs2_params = list(extsize=1e5, llocal=1e8, slocal=2e6, qvalue_cutoff=0.05, peak_max_gap=1e5, peak_min_length=20)
-  z.control = junctions_df %>%
+  z.sample = junctions_df %>%
     dplyr::filter(!grepl("chrX|chrY", break_bait_chrom))
-  p = call_peaks(z.control, macs2_params)
+  z.control = NULL
+  p = call_peaks(z.sample, macs2_params)
 
 
   #
