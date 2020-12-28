@@ -15,9 +15,11 @@ call_peaks = function(z.sample, macs2_params, z.control=NULL) {
   macs2_control_scale = nrow(z.control)/nrow(z.sample)
 
   sample_bed_path = "data/breakensembl/Sample.bed"
+  z.sample = z.sample %>% dplyr::mutate(break_name=stringr::str_glue("{bait}_{name}", bait=break_bait_chrom, name=break_name))
   readr::write_tsv(z.sample %>% dplyr::select(break_chrom, break_start, break_end, break_name, break_score, break_strand), sample_bed_path, col_names=F)
 
   control_bed_path = "data/breakensembl/Control.bed"
+  z.control = z.control %>% dplyr::mutate(break_name=stringr::str_glue("{bait}_{name}", bait=break_bait_chrom, name=break_name))
   readr::write_tsv(z.control %>% dplyr::select(break_chrom, break_start, break_end, break_name, break_score, break_strand), control_bed_path, col_names=F)
 
   # D background
@@ -63,13 +65,15 @@ call_peaks = function(z.sample, macs2_params, z.control=NULL) {
   macs2_peaks_path = "data/macs2/Sample_peaks.bed"
   system(stringr::str_glue("macs2 bdgpeakcall -i {qvalue} -c {cutoff} --min-length {format(peak_min_length, scientific=F)} --max-gap {format(peak_max_gap, scientific=F)} -o {output}", qvalue=macs2_qvalue_path, output=macs2_peaks_path, cutoff=-log10(macs2_params$qvalue_cutoff), peak_max_gap=macs2_params$peak_max_gap, peak_min_length=macs2_params$peak_min_length))
 
-
+  # Read results file
   peaks_cols = cols(
     peak_chrom=col_character(), peak_start=col_double(), peak_end=col_double(), peak_length=col_character(), peak_abs_summit=col_double(),
     peak_score=col_character(), peak_fc=col_double(), peak_pvalue_log10=col_double(), peak_qvalue_log10=col_double(), peak_sammit_offset=col_character()
   )
   peaks = readr::read_tsv(macs2_peaks_path, skip=1, col_names=names(peaks_cols$cols), col_types=peaks_cols) %>%
     dplyr::mutate(peak_id=1:n())
+
+
 
   z_ranges = with(z.sample, IRanges::IRanges(start=break_start, end=break_end, break_id=break_id, break_chrom=break_chrom, break_bait_chrom=break_bait_chrom, break_exp_condition=break_exp_condition))
   peaks_ranges = with(peaks, IRanges::IRanges(start=peak_start, end=peak_end, peak_id=peak_id, peak_chrom=peak_chrom))
@@ -80,32 +84,63 @@ call_peaks = function(z.sample, macs2_params, z.control=NULL) {
     dplyr::left_join(peaks2z.map, by="break_id")
 
   z_clustered_peaks = z_clustered %>%
-    dplyr::mutate(breaks_n=n()) %>%
-    dplyr::group_by(peak_id) %>%
-    dplyr::mutate(total_peak_breaks_n=n(), clustered_peak_breaks_n=sum(!is.na(peak_id))) %>%
-    dplyr::group_by(break_bait_chrom) %>%
-    dplyr::mutate(total_bait_breaks_n=n(), clustered_bait_breaks_n=sum(!is.na(peak_id))) %>%
-    dplyr::ungroup() %>%
     dplyr::filter(!is.na(peak_id)) %>%
+    dplyr::inner_join(peaks, by="peak_id") %>%
+    dplyr::mutate(breaks_n=n()) %>%
+    dplyr::group_by(break_bait_chrom) %>%
+    dplyr::mutate(total_bait_breaks_n=n()) %>%
+    dplyr::group_by(peak_id) %>%
+    dplyr::mutate(total_peak_breaks_n=n()) %>%
+    dplyr::group_by(break_bait_chrom) %>%
+    dplyr::mutate(total_bait_breaks_n=n()) %>%
     dplyr::group_by(peak_id, break_bait_chrom) %>%
     dplyr::do((function(y){
+      # y = z_clustered_peaks %>% dplyr::filter(break_bait_chrom=="chr1" & peak_id==424)
       yy<<-y
       x11 = nrow(y)
-      x12 = y$clustered_peak_breaks_n[1] - x11
-      x21 = y$total_peak_breaks_n[1] - x11
-      x22 = y$breaks_n[1] - x11 - x12 - x21
-      peak_bait_frac = x11 / y$clustered_peak_breaks_n[1]
+      x12 = y$total_peak_breaks_n[1] - x11
+      x21 = y$total_bait_breaks_n[1] - x11
+      x22 = y$breaks_n[1] - y$total_bait_breaks_n[1] - x12
+      peak_bait_frac = x11 / y$total_peak_breaks_n[1]
       x = matrix(c(x11,x12,x21,x22), ncol=2)
       test = fisher.test(x)
-      data.frame(peak_bait_frac=peak_bait_frac, pvalue=test$p.value)
+      data.frame(
+        peak_id=y$peak_id[1],
+        break_bait_chrom=y$break_bait_chrom[1],
+        peak_chrom=y$peak_chrom[1],
+        peak_start=y$peak_start[1],
+        peak_end=y$peak_end[1],
+        peak_bait_breaks=x11,
+        total_peak_breaks=y$total_peak_breaks_n[1],
+        peak_bait_frac=peak_bait_frac,
+        pvalue=test$p.value,
+        odds=test$estimate)
     })(.))
 
-  matrix(c(peak_n[1],3,total_peaks_n[1]-peak_n[1],4), ncol=2)
-#%>%
-    dplyr::group_by(peak_id) %>%
-    dplyr::arrange(dplyr::desc(bait_peak_frac)) %>%
-    dplyr::filter(bait_peak_frac>0.01) %>%
-    dplyr::summarise(peak_bait_content=paste(paste(break_bait_chrom, "=", round(bait_peak_frac, 2)), collapse=", "))
+
+  # z_clustered_peaks_ranges = with(z_clustered_peaks, IRanges::IRanges(start=peak_start-1e6, end=peak_end+1e6, peak_id=peak_id, peak_chrom=peak_chrom, peak_bait_chrom=break_bait_chrom, peak_bait_frac=peak_bait_frac))
+  # offtargets_ranges_near = with(offtargets_df, IRanges::IRanges(start=offtarget_start, end=offtarget_end, offtarget_id=offtarget_id, offtarget_chrom=offtarget_chrom, offtarget_bait_chrom=bait_chrom))
+  # z_clustered_peaks_ranges_map = as.data.frame(IRanges::mergeByOverlaps(offtargets_ranges_near, z_clustered_peaks_ranges)) %>%
+  #   dplyr::filter(peak_chrom==offtarget_chrom & peak_bait_frac>0.1) %>%
+  #   dplyr::mutate(peak_bait_frac=round(peak_bait_frac, 2)) %>%
+  #   dplyr::select(peak_id, peak_bait_chrom, offtarget_bait_chrom, offtarget_chrom, peak_chrom, peak_bait_frac)
+  #   dplyr::distinct(peak_id, offtarget_bait_chrom) %>%
+  #   dplyr::mutate(is_offtarget=T)
+  # junctions_df = junctions_df %>%
+  #   dplyr::select(-dplyr::matches("is_near_bait")) %>%
+  #   dplyr::left_join(offtarget2junctions.map, by="break_id") %>%
+  #   dplyr::mutate(is_near_bait=tidyr::replace_na(is_near_bait, F))
+
+
+  z_clustered_peaks %>%
+    dplyr::filter(peak_bait_breaks>20 & peak_bait_frac>0.2 & odds>1 & pvalue<0.05) %>%
+    dplyr::group_by(peak_chrom, peak_start, peak_end, peak_id) %>%
+    dplyr::arrange(dplyr::desc(peak_bait_frac)) %>%
+    dplyr::summarise(peak_bait_content=paste(paste0(break_bait_chrom, "=", round(peak_bait_frac, 2)), collapse=", "), score="0", peak_strand="+") %>%
+    dplyr::select(peak_chrom, peak_start, peak_end, peak_bait_content, score, peak_strand) %>%
+    readr::write_tsv("data/macs2/enriched_peaks.bed", col_names=F)
+
+  list(peaks=peaks, peaks_bait_stats=z_clustered_peaks)
 }
 
 read_breaks_experiments = function(path, chromosomes_map) {
@@ -185,8 +220,8 @@ main = function() {
   # Find breaks close to bait
   #
   junctions_ranges = with(junctions_df, IRanges::IRanges(start=break_start, end=break_end, break_id=break_id, break_chrom=break_chrom, break_bait_chrom=break_bait_chrom, break_exp_condition=break_exp_condition))
-  offtargets_ranges = with(offtargets_df %>% dplyr::filter(offtarget_mismatches==0), IRanges::IRanges(start=offtarget_start-3e6, end=offtarget_end+3e6, offtarget_id=offtarget_id, offtarget_chrom=offtarget_chrom, offtarget_bait_chrom=bait_chrom))
-  offtarget2junctions.map = as.data.frame(IRanges::mergeByOverlaps(offtargets_ranges, junctions_ranges)) %>%
+  offtargets_ranges_near = with(offtargets_df %>% dplyr::filter(offtarget_mismatches==0), IRanges::IRanges(start=offtarget_start-2e6, end=offtarget_end+2e6, offtarget_id=offtarget_id, offtarget_chrom=offtarget_chrom, offtarget_bait_chrom=bait_chrom))
+  offtarget2junctions.map = as.data.frame(IRanges::mergeByOverlaps(offtargets_ranges_near, junctions_ranges)) %>%
     dplyr::filter(break_chrom==offtarget_chrom & break_bait_chrom==offtarget_bait_chrom) %>%
     dplyr::mutate(is_near_bait=T) %>%
     dplyr::distinct(break_id, is_near_bait)
@@ -194,6 +229,12 @@ main = function() {
     dplyr::select(-dplyr::matches("is_near_bait")) %>%
     dplyr::left_join(offtarget2junctions.map, by="break_id") %>%
     dplyr::mutate(is_near_bait=tidyr::replace_na(is_near_bait, F))
+
+
+
+
+  macs2_params = list(extsize=1e5, llocal=1e8, slocal=2e6, qvalue_cutoff=0.05, peak_max_gap=1e5, peak_min_length=20)
+  p = call_peaks(z.control, macs2_params)
 
 
   #
@@ -205,9 +246,6 @@ main = function() {
     dplyr::filter(!is_near_bait & break_bait_chrom != break_chrom)
   z.sample = z %>% dplyr::filter(break_exp_condition=="Sample")
   z.control = z %>% dplyr::filter(break_exp_condition=="Control")
-
-  macs2_params = list(extsize=1e5, llocal=1e8, slocal=2e6, qvalue_cutoff=0.05, peak_max_gap=1e5, peak_min_length=20)
-  peaks_all = call_peaks(z, macs2_params)
 
 
   #macs2_params = list(extsize=1e5, qvalue=0.01, llocal=1e7, slocal=2e6, shift=5e4, qvalue_cutoff=0.05, peak_max_gap=1e5, peak_min_length=1)
