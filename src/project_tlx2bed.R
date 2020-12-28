@@ -38,6 +38,8 @@ call_peaks = function(z.sample, macs2_params, z.control=NULL) {
   macs2_llocal_norm_path = "data/macs2/Control_llocal_norm.bdg"
   system(stringr::str_glue("macs2 bdgopt -i {input} -m multiply -p {norm} -o {output}", input=macs2_llocal_path, output=macs2_llocal_norm_path, norm=macs2_params$extsize / macs2_params$llocal))
 
+  #T
+
   # glocal background
   mm9 = GenomeInfoDb::Seqinfo(genome="mm9")
   mm9_size = sum(mm9@seqlengths)
@@ -234,6 +236,8 @@ main = function() {
 
 
   macs2_params = list(extsize=1e5, llocal=1e8, slocal=2e6, qvalue_cutoff=0.05, peak_max_gap=1e5, peak_min_length=20)
+  z.control = junctions_df %>%
+    dplyr::filter(!grepl("chrX|chrY", break_bait_chrom))
   p = call_peaks(z.control, macs2_params)
 
 
