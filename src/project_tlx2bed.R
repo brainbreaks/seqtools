@@ -4,6 +4,7 @@ library(IRanges)
 library(tidyr)
 library(ggplot2)
 library(BSgenome)
+library(baseline)
 
 
 call_peaks = function(z.sample, macs2_params, z.control=NULL) {
@@ -22,60 +23,88 @@ call_peaks = function(z.sample, macs2_params, z.control=NULL) {
   z.control = z.control %>% dplyr::mutate(break_name=stringr::str_glue("{bait}_{name}", bait=break_bait_chrom, name=break_name))
   readr::write_tsv(z.control %>% dplyr::select(break_chrom, break_start, break_end, break_name, break_score, break_strand), control_bed_path, col_names=F)
 
-
-
-
-#%>%
-#    GenomicRanges::makeGRangesFromDataFrame(keep.extra.columns=T)
-#  rtracklayer::export.bedGraph(bins, macs2_slocal_path)
-
-  bins_df = as.data.frame(bins)
-  x = bins_df %>%
-    dplyr::group_by(seqnames) %>%
-    dplyr::summarize(coverage=quantile(coverage, 0.5))
-  plot(x)
-
-
   # D background
   macs2_dlocal_path = "data/macs2/Control_dlocal.bdg"
   system(stringr::str_glue("macs2 pileup -i {input} -f BED -B --extsize {format(extsize, scientific=F)} -o {output}", input=control_bed_path, output=macs2_dlocal_path, extsize=macs2_params$extsize/2))
 
   # slocal background
+  options("UCSC.goldenPath.url"="http://hgdownload.cse.ucsc.edu/goldenPath")
+  mm9 = GenomeInfoDb::Seqinfo(genome="mm9")[paste0("chr", 1:19)]
+  mm9_size = sum(mm9@seqlengths)
+  mm9_effective_size=0.74 * mm9_size
+
   macs2_slocal_norm_path = "data/macs2/Control_slocal_norm.bdg"
   macs2_slocal_path = "data/macs2/Control_slocal.bdg"
-  #system(stringr::str_glue("macs2 pileup -i {input} -f BED -B --extsize {format(extsize, scientific=F)} -o {output}", input=control_bed_path, output=macs2_slocal_path, extsize=macs2_params$slocal/2))
-  #system(stringr::str_glue("macs2 bdgopt -i {input} -m multiply -p {norm} -o {output}", input=macs2_slocal_path, output=macs2_slocal_norm_path, norm=macs2_params$extsize / macs2_params$slocal))
-  reads = rtracklayer::import.bed(sample_bed_path)
-  binsize = 1e5
+
+
+  binsize = 1e4
   extend = 1e5
-  reads.extended = GenomicRanges::resize(reads, width=extend, fix="center")
+  llocal = 6e6
+  reads = rtracklayer::import.bed(sample_bed_path)
+  reads_extended = GenomicRanges::resize(reads, width=extend, fix="center")
+  reads_extended.cov = data.table::as.data.table(as(GenomicRanges::coverage(reads_extended), "GRanges")) %>%
+    dplyr::rename(coverage="score")
+
   bins = unlist(tileGenome(mm9, tilewidth=binsize))
-  bins$coverage = GenomicRanges::countOverlaps(bins, reads.extended)
-  bins = as.data.frame(bins) %>%
+  bins$coverage = GenomicRanges::countOverlaps(bins, reads_extended)
+  bins = data.table::as.data.table(bins) %>%
     dplyr::arrange(seqnames, start) %>%
     dplyr::group_by(seqnames) %>%
-    dplyr::mutate(coverage=zoo::rollapply(coverage, width=4e6/binsize, partial=T, FUN=quantile, 0.1, na.rm=T)) %>%
-    dplyr::ungroup() %>%
-    dplyr::mutate(coverage=zoo::na.fill(coverage, "extend")) %>%
-    dplyr::select(seqnames, start, end, coverage)
-  plot(as.data.frame(bins)$coverage, type="l")
+    dplyr::mutate(is_q2=coverage>quantile(coverage, 0.2), is_q8=coverage<quantile(coverage, 0.8), is_inner_quantile=is_q2 & is_q8) %>%
+    dplyr::mutate(coverage_median=median(coverage[is_inner_quantile], na.rm=T), coverage_sd=sd(coverage[is_inner_quantile], na.rm=T)) %>%
+    dplyr::mutate(coverage_min=coverage_median-2*coverage_sd) %>%
+    dplyr::mutate(coverage_mod=ifelse(coverage<coverage_min, NA_real_, coverage)) %>%
+    dplyr::mutate(coverage_mod=zoo::na.fill(coverage_mod, "extend", steep = 10, half = 5)) %>%
+    dplyr::do((function(z){
+      zz<<-z
+      x = matrix(as.numeric(z$coverage_mod), nrow=1)
+      colnames(x) = z$start
+      # bc.irls = baseline::baseline(x, method="medianWindow", hws=2e6/binsize, hwm=5e6/binsize)
+      # bc.irls = baseline(x, method="rollingBall", wm=1e6/binsize, ws=2e6/binsize)
+      # bc.irls = baseline::baseline(x, method="irls", lambda1=7, lambda2=13) # 1e2
+      # bc.irls = baseline::baseline(x, method="irls" lambda1=5, lambda2=10)
+      bc.irls = baseline::baseline(x, method="irls", lambda1=4, lambda2=9) # For binsize = 1e4 / extend = 1e5
+      z$coverage_smooth = as.numeric(bc.irls@baseline)
+      # ggplot(z) +
+      #   geom_line(aes(x=start, y=coverage, color="reads")) +
+      #   geom_line(aes(x=start, y=coverage_smooth, color="baseline")) +
+      #   coord_cartesian(ylim=c(0, 100))
 
-  x5 = bins %>%
-    dplyr::group_by(seqnames) %>%
-    dplyr::summarise(coverage=max(coverage))
+      z
+    })(.)) %>%
+    dplyr::ungroup()
 
-  plot(x4$coverage, x6$coverage)
-  abline(a=0, b=0.01)
+  ggplot(bins) +
+    geom_line(aes(y=coverage, x=start, color="pileup"), data=reads_extended.cov, alpha=0.8) +
+    # geom_line(aes(y=coverage, x=start, color="coverage")) +
+    geom_line(aes(y=coverage_smooth, x=start, color="smooth")) +
+    coord_cartesian(ylim=c(0, 100)) +
+    facet_wrap(~seqnames, scales="free_x", ncol=5)
 
-  plot(x5$coverage, x6$coverage)
-  abline(a=0, b=1)
+  macs2_noise_path = "data/macs2/Control_noise.bdg"
+  readr::write_tsv(bins %>% dplyr::select(seqnames, start, end, coverage_smooth), file=macs2_noise_path, col_names=F)
 
-  plot(x4$coverage, x5$coverage)
-  abline(a=0, b=1)
+  macs2_pileup_path = "data/macs2/Sample_pileup.bdg"
+  readr::write_tsv(reads_extended.cov %>% dplyr::select(seqnames, start, end, coverage), file=macs2_pileup_path, col_names=F)
+
+  macs2_qvalue_path = "data/macs2/Sample_qvalue.bdg"
+  system(stringr::str_glue("macs2 bdgcmp -t {input} -c {noise} -m qpois -o {output}", input=macs2_pileup_path, noise=macs2_noise_path, output=macs2_qvalue_path))
+
+  # Call peaks
+  macs2_peaks_path = "data/macs2/Sample_peaks.bed"
+  system(stringr::str_glue("macs2 bdgpeakcall -i {qvalue} -c {cutoff} --min-length {format(peak_min_length, scientific=F)} --max-gap {format(peak_max_gap, scientific=F)} -o {output}", qvalue=macs2_qvalue_path, output=macs2_peaks_path, cutoff=-log10(macs2_params$qvalue_cutoff), peak_max_gap=macs2_params$peak_max_gap, peak_min_length=macs2_params$peak_min_length))
+
 
 
   macs2_params$extsize / macs2_params$slocal
   readr::write_tsv(bins, file="data/macs2/coverage.bdg", col_names=F)
+
+
+  # llocal background
+  macs2_llocal_path = "data/macs2/Control_llocal.bdg"
+  system(stringr::str_glue("macs2 pileup -i {input} -f BED -B --extsize {format(extsize, scientific=F)} -o {output}", input=control_bed_path, output=macs2_llocal_path, extsize=extend/2))
+  macs2_llocal_norm_path = "data/macs2/Control_llocal_norm.bdg"
+  system(stringr::str_glue("macs2 bdgopt -i {input} -m multiply -p {norm} -o {output}", input=macs2_llocal_path, output=macs2_llocal_norm_path, norm=macs2_params$extsize / macs2_params$llocal))
 
 
 
@@ -264,7 +293,8 @@ main = function() {
 
   bed_cols = cols(chrom=col_character(), start=col_double(), end=col_double(), name=col_character(), score=col_character(), strand=col_character())
 
-  junctions_df = read_breaks_experiments("data/breaks_tlx", chromosomes_map=chromosomes_map)
+  junctions_df = read_breaks_experiments("data/breaks_tlx", chromosomes_map=chromosomes_map) %>%
+    dplyr::filter(grepl("chr[0-9]", break_chrom))
 
 
   #
