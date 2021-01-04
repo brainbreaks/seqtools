@@ -28,13 +28,10 @@ call_peaks = function(z.sample, macs2_params, z.control=NULL) {
   system(stringr::str_glue("macs2 pileup -i {input} -f BED -B --extsize {format(extsize, scientific=F)} -o {output}", input=control_bed_path, output=macs2_dlocal_path, extsize=macs2_params$extsize/2))
 
   # slocal background
-  options("UCSC.goldenPath.url"="http://hgdownload.cse.ucsc.edu/goldenPath")
+  options("UCSC.goldenPath.url"="https://hgdownload.cse.ucsc.edu/goldenPath")
   mm9 = GenomeInfoDb::Seqinfo(genome="mm9")[paste0("chr", 1:19)]
   mm9_size = sum(mm9@seqlengths)
   mm9_effective_size=0.74 * mm9_size
-
-  macs2_slocal_norm_path = "data/macs2/Control_slocal_norm.bdg"
-  macs2_slocal_path = "data/macs2/Control_slocal.bdg"
 
 
   binsize = 1e4
@@ -42,8 +39,10 @@ call_peaks = function(z.sample, macs2_params, z.control=NULL) {
   llocal = 6e6
   reads = rtracklayer::import.bed(sample_bed_path)
   reads_extended = GenomicRanges::resize(reads, width=extend, fix="center")
+  reads_extended = GenomicRanges::restrict(reads_extended, start=0, end=setNames(seqlengths(mm9), seqnames(mm9)))
   reads_extended.cov = data.table::as.data.table(as(GenomicRanges::coverage(reads_extended), "GRanges")) %>%
-    dplyr::rename(coverage="score")
+    dplyr::rename(coverage="score") %>%
+    dplyr::mutate(coverage=ifelse(coverage<1, 1, coverage))
 
   bins = unlist(tileGenome(mm9, tilewidth=binsize))
   bins$coverage = GenomicRanges::countOverlaps(bins, reads_extended)
@@ -74,18 +73,37 @@ call_peaks = function(z.sample, macs2_params, z.control=NULL) {
     })(.)) %>%
     dplyr::ungroup()
 
+  pdf(file="baseline.pdf", width=20, height=15)
+  ggplot.colors = c("pileup"="#333333", "smooth"="#FF0000")
   ggplot(bins) +
-    geom_line(aes(y=coverage, x=start, color="pileup"), data=reads_extended.cov, alpha=0.8) +
-    # geom_line(aes(y=coverage, x=start, color="coverage")) +
-    geom_line(aes(y=coverage_smooth, x=start, color="smooth")) +
+    geom_bar(aes(y=coverage, x=start, fill="pileup"), stat="identity", data=as.data.frame(reads_extended.cov), alpha=0.8) +
+    geom_line(aes(y=coverage_smooth, x=start, color="smooth"), alpha=0.8) +
     coord_cartesian(ylim=c(0, 100)) +
-    facet_wrap(~seqnames, scales="free_x", ncol=5)
+    scale_color_manual(values=ggplot.colors) +
+    scale_fill_manual(values=ggplot.colors) +
+    facet_wrap(~seqnames, scales="free_x", ncol=4)
+
+  for(chr in paste0("chr", 1:19)) {
+    p = ggplot(bins %>% dplyr::filter(seqnames==chr)) +
+      geom_bar(aes(y=coverage, x=start, fill="pileup"), stat="identity", data=as.data.frame(reads_extended.cov) %>% dplyr::filter(seqnames==chr), alpha=0.8) +
+      geom_line(aes(y=coverage_smooth, x=start, color="smooth"), alpha=0.8) +
+      coord_cartesian(ylim=c(0, 100)) +
+      scale_color_manual(values=ggplot.colors) +
+      scale_fill_manual(values=ggplot.colors) +
+      facet_wrap(~seqnames, scales="free_x", ncol=5)
+    print(p)
+  }
+  dev.off()
 
   macs2_noise_path = "data/macs2/Control_noise.bdg"
   readr::write_tsv(bins %>% dplyr::select(seqnames, start, end, coverage_smooth), file=macs2_noise_path, col_names=F)
 
   macs2_pileup_path = "data/macs2/Sample_pileup.bdg"
   readr::write_tsv(reads_extended.cov %>% dplyr::select(seqnames, start, end, coverage), file=macs2_pileup_path, col_names=F)
+
+  macs2_pileup_path = "data/macs2/Sample_pileup2.bdg"
+  rtracklayer::export.bedGraph(reads_extended, con=macs2_pileup_path)
+  readr::write_tsv(reads_extended %>% dplyr::select(seqnames, start, end), file=macs2_pileup_path, col_names=F)
 
   macs2_qvalue_path = "data/macs2/Sample_qvalue.bdg"
   system(stringr::str_glue("macs2 bdgcmp -t {input} -c {noise} -m qpois -o {output}", input=macs2_pileup_path, noise=macs2_noise_path, output=macs2_qvalue_path))
@@ -94,6 +112,7 @@ call_peaks = function(z.sample, macs2_params, z.control=NULL) {
   macs2_peaks_path = "data/macs2/Sample_peaks.bed"
   system(stringr::str_glue("macs2 bdgpeakcall -i {qvalue} -c {cutoff} --min-length {format(peak_min_length, scientific=F)} --max-gap {format(peak_max_gap, scientific=F)} -o {output}", qvalue=macs2_qvalue_path, output=macs2_peaks_path, cutoff=-log10(macs2_params$qvalue_cutoff), peak_max_gap=macs2_params$peak_max_gap, peak_min_length=macs2_params$peak_min_length))
 
+  export(bins %>% dplyr::select(seqnames, start, end, coverage_smooth), format="bedGraph")
 
 
   macs2_params$extsize / macs2_params$slocal
