@@ -95,18 +95,14 @@ call_peaks = function(z.sample, macs2_params, z.control=NULL) {
   }
   dev.off()
 
-  macs2_noise_path = "data/macs2/Control_noise.bdg"
-  readr::write_tsv(bins %>% dplyr::select(seqnames, start, end, coverage_smooth), file=macs2_noise_path, col_names=F)
-
-  macs2_pileup_path = "data/macs2/Sample_pileup.bdg"
-  readr::write_tsv(reads_extended.cov %>% dplyr::select(seqnames, start, end, coverage), file=macs2_pileup_path, col_names=F)
-
-  macs2_pileup_path = "data/macs2/Sample_pileup2.bdg"
-  rtracklayer::export.bedGraph(reads_extended, con=macs2_pileup_path)
-  readr::write_tsv(reads_extended %>% dplyr::select(seqnames, start, end), file=macs2_pileup_path, col_names=F)
-
+  # Calculate qvalue
   macs2_qvalue_path = "data/macs2/Sample_qvalue.bdg"
   system(stringr::str_glue("macs2 bdgcmp -t {input} -c {noise} -m qpois -o {output}", input=macs2_pileup_path, noise=macs2_noise_path, output=macs2_qvalue_path))
+
+  # Call peaks
+  macs2_peaks_path = "data/macs2/Sample_peaks.bed"
+  system(stringr::str_glue("macs2 bdgpeakcall -i {qvalue} -c {cutoff} --min-length {format(peak_min_length, scientific=F)} --max-gap {format(peak_max_gap, scientific=F)} -o {output}", qvalue=macs2_qvalue_path, output=macs2_peaks_path, cutoff=-log10(macs2_params$qvalue_cutoff), peak_max_gap=macs2_params$peak_max_gap, peak_min_length=macs2_params$peak_min_length))
+
 
   # Call peaks
   macs2_peaks_path = "data/macs2/Sample_peaks.bed"
