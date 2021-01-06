@@ -13,6 +13,7 @@ library(Biostrings)
 library(BSgenome)
 
 
+  genome_mm9 = Biostrings::readDNAStringSet("data/mm9/mm9.fa.gz", "fasta")
 
 analyze.primers_in_mm9 = function() {
   chromosomes_map_df = readr::read_tsv("data/mm9_chromosomes_synonyms.tsv")
