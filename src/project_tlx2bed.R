@@ -13,14 +13,47 @@ scale_breaks = function(x) {
     breaks
 }
 
-call_peaks = function(sample_df, macs2_params, control_df=NULL, debug=F) {
+calculate_coverage = function(ranges, scale_factor_df, mm9, extend) {
+  ranges.extended = GenomicRanges::resize(ranges, width=extend, fix="center")
+  ranges.extended = GenomicRanges::restrict(ranges.extended, start=0, end=setNames(seqlengths(mm9), seqnames(mm9)))
+  df.coverage = as.data.frame(ranges.extended) %>%
+    dplyr::group_by(break_bait_chrom) %>%
+    dplyr::do((function(z){
+      zz<<-z
+      z_ranges = GenomicRanges::makeGRangesFromDataFrame(z, keep.extra.columns=T)
+      as.data.frame(as(GenomicRanges::coverage(z_ranges), "GRanges")) %>%
+        dplyr::mutate(break_bait_chrom = z$break_bait_chrom[1]) %>%
+        dplyr::select(seqnames, start, end, score)
+    })(.)) %>%
+    dplyr::ungroup() %>%
+    dplyr::inner_join(scale_factor_df, by=c("break_bait_chrom")) %>%
+    dplyr::mutate(score_norm=score*chrom_factor*control_scale_factor)
+
+  total_path  = tempfile()
+  i = 0
+  for(chr in unique(df.coverage$break_bait_chrom)) {
+    i = i + 1
+    chr_tmp_path = tempfile()
+    df_chr.coverage = df.coverage %>% dplyr::filter(break_bait_chrom==chr)
+
+    readr::write_tsv(df_chr.coverage %>% dplyr::select(seqnames, start, end, score), chr_tmp_path, col_names=F)
+    ifelse(i==1) {
+      stringr::str_glue("macs2 bdgopt -i {total} -m add -p {chr} -o {total}", total=total_path, chr=chr_tmp_path)
+    } else {
+      total_path
+    }
+  }
+
+}
+
+call_peaks = function(sample_df, control_df=NULL, debug=F) {
   binsize = 1e4
   extend = 1e5
   llocal = 6e6
   peaks_minqvalue=-log10(0.01)
   peaks_maxgap=1e5
   peaks_minlen=200
-  debug=F
+  debug=T
 
   do_compare = !is.null(control_df)
 
@@ -69,28 +102,13 @@ call_peaks = function(sample_df, macs2_params, control_df=NULL, debug=F) {
   mm9_effective_size=0.74 * mm9_size
 
   control_ranges = GenomicRanges::makeGRangesFromDataFrame(control_df, end.field="break_end", start.field="break_start", strand.field="break_strand", seqnames.field="break_chrom", keep.extra.columns=T)
-  control_ranges.extended = GenomicRanges::resize(control_ranges, width=extend, fix="center")
-  control_ranges.extended = GenomicRanges::restrict(control_ranges.extended, start=0, end=setNames(seqlengths(mm9), seqnames(mm9)))
-  control_df.coverage = as.data.frame(control_ranges.extended) %>%
-    dplyr::group_by(break_bait_chrom) %>%
-    dplyr::do((function(z){
-      zz<<-z
-      as.data.frame(as(GenomicRanges::coverage(control_ranges.extended), "GRanges")) %>%
-        dplyr::mutate(break_bait_chrom = z$break_bait_chrom[1]) %>%
-        dplyr::select(seqnames, start, end, score)
-    })(.)) %>%
-    dplyr::ungroup() %>%
-    dplyr::inner_join(scale_factor_df, by=c("break_bait_chrom")) %>%
-    dplyr::mutate(score_norm=score*chrom_factor*control_scale_factor)
+  control_df.coverage = calculate_coverage(control_ranges, scale_factor_df, mm9, extend)
   readr::write_tsv(control_df.coverage %>% dplyr::select(seqnames, start, end, score_norm), control_bdg_path, col_names=F)
 
+  sample_ranges = GenomicRanges::makeGRangesFromDataFrame(sample_df, end.field="break_end", start.field="break_start", strand.field="break_strand", seqnames.field="break_chrom", keep.extra.columns=T)
+  sample_df.coverage = calculate_coverage(sample_ranges, scale_factor_df, mm9, extend)
+  readr::write_tsv(sample_df.coverage %>% dplyr::select(seqnames, start, end, score_norm), sample_bdg_path, col_names=F)
 
-  sample_ranges = GenomicRanges::makeGRangesFromDataFrame(sample_df, end.field="break_end", start.field="break_start", strand.field="break_strand", seqnames.field="break_chrom")
-  sample_ranges.extended = GenomicRanges::resize(sample_ranges, width=extend, fix="center")
-  sample_ranges.extended = GenomicRanges::restrict(sample_ranges.extended, start=0, end=setNames(seqlengths(mm9), seqnames(mm9)))
-  sample_df.coverage = data.table::as.data.table(as(GenomicRanges::coverage(sample_ranges.extended), "GRanges")) %>%
-    dplyr::mutate(score=score*sample_scale)
-  readr::write_tsv(sample_df.coverage %>% dplyr::select(seqnames, start, end, score), sample_bdg_path, col_names=F)
 
   sample_sizes = sample_df.coverage %>%
     dplyr::group_by(seqnames) %>%
@@ -440,7 +458,7 @@ main = function() {
   macs2_params = list(extsize=1e5, llocal=1e8, slocal=2e6, qvalue_cutoff=0.05, peak_max_gap=1e5, peak_min_length=20)
   sample_df = junctions_df %>% dplyr::filter(!grepl("chrX|chrY", break_bait_chrom) & break_exp_condition=="Sample")
   control_df = junctions_df %>% dplyr::filter(!grepl("chrX|chrY", break_bait_chrom) & break_exp_condition=="Control")
-  p = call_peaks(sample_df, macs2_params)
+  p = call_peaks(sample_df, control_df)
 
 
   #
