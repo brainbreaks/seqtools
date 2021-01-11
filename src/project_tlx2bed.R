@@ -13,37 +13,49 @@ scale_breaks = function(x) {
     breaks
 }
 
-calculate_coverage = function(ranges, scale_factor_df, mm9, extend) {
+calculate_coverage = function(ranges, mm9, extend) {
   ranges.extended = GenomicRanges::resize(ranges, width=extend, fix="center")
   ranges.extended = GenomicRanges::restrict(ranges.extended, start=0, end=setNames(seqlengths(mm9), seqnames(mm9)))
-  df.coverage = as.data.frame(ranges.extended) %>%
+  coverage_df = as.data.frame(ranges.extended) %>%
     dplyr::group_by(break_bait_chrom) %>%
     dplyr::do((function(z){
       zz<<-z
       z_ranges = GenomicRanges::makeGRangesFromDataFrame(z, keep.extra.columns=T)
       as.data.frame(as(GenomicRanges::coverage(z_ranges), "GRanges")) %>%
-        dplyr::mutate(break_bait_chrom = z$break_bait_chrom[1]) %>%
-        dplyr::select(seqnames, start, end, score)
+        tidyr::crossing(z %>% dplyr::select(break_bait_chrom, scale_factor) %>% dplyr::slice(1)) %>%
+        dplyr::select(seqnames, start, end, score, scale_factor)
     })(.)) %>%
     dplyr::ungroup() %>%
-    dplyr::inner_join(scale_factor_df, by=c("break_bait_chrom")) %>%
-    dplyr::mutate(score_norm=score*chrom_factor*control_scale_factor)
+    dplyr::mutate(score_norm=score*scale_factor) %>%
+    dplyr::select(-scale_factor)
 
-  total_path  = tempfile()
+  # tempfile()
+  total_path  = "data/macs2/total.bdg"
+  chr_tmp_path  = "data/macs2/chr.bdg"
+  # chr_tmp_path = tempfile()
+  # total_path = tempfile()
   i = 0
-  for(chr in unique(df.coverage$break_bait_chrom)) {
-    i = i + 1
-    chr_tmp_path = tempfile()
-    df_chr.coverage = df.coverage %>% dplyr::filter(break_bait_chrom==chr)
+  for(chr in unique(coverage_df$break_bait_chrom)) {
+    # chr = "chr3"
+    coverage_df.chr = coverage_df %>% dplyr::filter(break_bait_chrom==chr)
 
-    readr::write_tsv(df_chr.coverage %>% dplyr::select(seqnames, start, end, score), chr_tmp_path, col_names=F)
-    ifelse(i==1) {
-      stringr::str_glue("macs2 bdgopt -i {total} -m add -p {chr} -o {total}", total=total_path, chr=chr_tmp_path)
+    if(i==0) {
+      print("Write total")
+      readr::write_tsv(coverage_df.chr %>% dplyr::select(seqnames, start, end, score_norm), total_path, col_names=F)
     } else {
-      total_path
+      print(paste0("Write chr: ", chr))
+      readr::write_tsv(coverage_df.chr %>% dplyr::mutate(score_norm=-score_norm) %>% dplyr::select(seqnames, start, end, score_norm), chr_tmp_path, col_names=F)
+      system(stringr::str_glue("macs2 bdgcmp -m subtract -t {total} -c {chr} -o {total}", total=total_path, chr=chr_tmp_path))
     }
+
+    i = i + 1
   }
 
+  bedgraph_cols = cols(seqnames=col_character(), start=col_double(), end=col_double(), coverage=col_double())
+  coverage_norm_df = readr::read_tsv(total_path, col_names=names(bedgraph_cols$cols), col_types=bedgraph_cols) %>%
+    dplyr::mutate(coverage_id=1:n())
+
+  coverage_norm_df
 }
 
 call_peaks = function(sample_df, control_df=NULL, debug=F) {
@@ -53,7 +65,7 @@ call_peaks = function(sample_df, control_df=NULL, debug=F) {
   peaks_minqvalue=-log10(0.01)
   peaks_maxgap=1e5
   peaks_minlen=200
-  debug=T
+  debug=F
 
   do_compare = !is.null(control_df)
 
@@ -81,55 +93,40 @@ call_peaks = function(sample_df, control_df=NULL, debug=F) {
     }
   }
 
-  # Calculate normalization accross experiment
-  control_libsize_df = control_df %>% dplyr::group_by(break_bait_chrom) %>% dplyr::summarise(libsize=n())
-  sample_libsize_df = sample_df %>% dplyr::group_by(break_bait_chrom) %>% dplyr::summarise(libsize=n())
-  scale_factor_df = control_libsize_df %>%
-    dplyr::inner_join(sample_libsize_df, by="break_bait_chrom") %>%
-    dplyr::mutate(
-      junctions_total=ifelse(libsize.y>libsize.x, libsize.x, libsize.y),
-      chrom_factor=n()*junctions_total/sum(junctions_total),
-      sample_scale_factor=ifelse(libsize.y>libsize.x, libsize.x/libsize.y, 1),
-      control_scale_factor=ifelse(libsize.x>libsize.y, libsize.y/libsize.x, 1)
-    ) %>%
-    dplyr::select(break_bait_chrom, junctions_total, chrom_factor, sample_scale_factor, control_scale_factor)
-
-
   # slocal background
   options("UCSC.goldenPath.url"="https://hgdownload.cse.ucsc.edu/goldenPath")
   mm9 = GenomeInfoDb::Seqinfo(genome="mm9")[paste0("chr", 1:19)]
   mm9_size = sum(mm9@seqlengths)
   mm9_effective_size=0.74 * mm9_size
+  mm9_tiles = unlist(tileGenome(mm9, tilewidth=binsize))
+  mm9_tiles$tile_id = 1:length(mm9_tiles)
 
   control_ranges = GenomicRanges::makeGRangesFromDataFrame(control_df, end.field="break_end", start.field="break_start", strand.field="break_strand", seqnames.field="break_chrom", keep.extra.columns=T)
-  control_df.coverage = calculate_coverage(control_ranges, scale_factor_df, mm9, extend)
-  readr::write_tsv(control_df.coverage %>% dplyr::select(seqnames, start, end, score_norm), control_bdg_path, col_names=F)
+  control_df.coverage = calculate_coverage(control_ranges, mm9, extend)
+  readr::write_tsv(control_df.coverage %>% dplyr::select(seqnames, start, end, coverage), control_bdg_path, col_names=F)
+
+  control_ranges.coverage = GenomicRanges::makeGRangesFromDataFrame(control_df.coverage, keep.extra.columns=T)
+  coverage2tile.map = as.data.frame(GenomicRanges::findOverlaps(mm9_tiles, control_ranges.coverage, ignore.strand=TRUE))
+  control_tiles_df.coverage = as.data.frame(mm9_tiles) %>%
+    dplyr::left_join(coverage2tile.map, by=c("tile_id"="queryHits")) %>%
+    dplyr::left_join(control_df.coverage %>% dplyr::select(coverage_id, coverage), by=c("subjectHits"="coverage_id")) %>%
+    dplyr::group_by(seqnames, start, end) %>%
+    dplyr::summarise(coverage=tidyr::replace_na(max(coverage), 0))
+  readr::write_tsv(control_tiles_df.coverage %>% dplyr::select(seqnames, start, end, coverage), "data/macs2/Control_tile.bdg", col_names=F)
 
   sample_ranges = GenomicRanges::makeGRangesFromDataFrame(sample_df, end.field="break_end", start.field="break_start", strand.field="break_strand", seqnames.field="break_chrom", keep.extra.columns=T)
-  sample_df.coverage = calculate_coverage(sample_ranges, scale_factor_df, mm9, extend)
-  readr::write_tsv(sample_df.coverage %>% dplyr::select(seqnames, start, end, score_norm), sample_bdg_path, col_names=F)
+  sample_df.coverage = calculate_coverage(sample_ranges, mm9, extend)
+  readr::write_tsv(sample_df.coverage %>% dplyr::select(seqnames, start, end, coverage), sample_bdg_path, col_names=F)
 
-
-  sample_sizes = sample_df.coverage %>%
-    dplyr::group_by(seqnames) %>%
-    dplyr::summarise(sample_start=min(start[score>=quantile(score, 0.05)], na.rm=T), sample_end=max(end[score>quantile(score, 0.05)], na.rm=T)) %>%
-    dplyr::select(seqnames, sample_start, sample_end)
-
-  #
-  # Calculate baseline
-  #
-  control_ranges.bins = unlist(tileGenome(mm9, tilewidth=binsize))
-  control_ranges.bins$coverage = GenomicRanges::countOverlaps(control_ranges.bins, control_ranges.extended)
-  baseline_df.extended = data.table::as.data.table(control_ranges.bins) %>%
-    dplyr::inner_join(sample_sizes, by="seqnames") %>%
-    # dplyr::filter(start>=sample_start & end<=sample_end) %>%
+  control_df.baseline = control_tiles_df.coverage %>%
+    dplyr::mutate(break_exp_condition="Control") %>%
     dplyr::arrange(seqnames, start) %>%
-    dplyr::group_by(seqnames) %>%
+    dplyr::group_by(break_exp_condition, seqnames) %>%
     dplyr::mutate(is_q2=coverage>quantile(coverage, 0.2), is_q8=coverage<quantile(coverage, 0.8), is_inner_quantile=is_q2 & is_q8) %>%
     dplyr::mutate(coverage_median=median(coverage[is_inner_quantile], na.rm=T), coverage_sd=sd(coverage[is_inner_quantile], na.rm=T)) %>%
     dplyr::mutate(coverage_min=coverage_median-2*coverage_sd) %>%
     dplyr::mutate(coverage_mod=ifelse(coverage<coverage_min, NA_real_, coverage)) %>%
-    dplyr::mutate(coverage_mod=zoo::na.fill(coverage_mod, "extend")) %>%
+    dplyr::mutate(is_filled=is.na(coverage_mod), coverage_mod=zoo::na.fill(coverage_mod, "extend")) %>%
     dplyr::do((function(z){
       zz<<-z
       # asdsad()
@@ -146,57 +143,122 @@ call_peaks = function(sample_df, control_df=NULL, debug=F) {
       z
     })(.)) %>%
     dplyr::ungroup()
+  readr::write_tsv(control_df.baseline %>% dplyr::select(seqnames, start, end, coverage_smooth), baseline_bdg_path, col_names=F)
+
+  x.raw = control_df.baseline %>%
+    dplyr::filter(!is_filled & coverage_smooth<1000) %>%
+    dplyr::mutate(coverage_start=floor(coverage_smooth), coverage_end=ceiling(coverage_smooth)) %>%
+    dplyr::group_by(coverage_start, coverage_end) %>%
+    dplyr::filter(n()>500) %>%
+    dplyr::filter(coverage<=quantile(coverage, 0.9)) %>%
+    dplyr::ungroup()
+  x = x.raw %>%
+    dplyr::group_by(coverage_start, coverage_end) %>%
+    dplyr::do((function(z){
+      zz<<-z
+      my.mle = MASS::fitdistr(z$coverage, densfun="gamma")
+      dplyr::bind_cols(z[1, c("coverage_start", "coverage_end")], as.data.frame(t(my.mle$estimate)), n=nrow(z))
+    })(.))
+
+  ggplot(x.raw) +
+    ggridges::geom_density_ridges(aes(x=coverage, y=factor(coverage_start)))
+
+  ggplot(x %>% dplyr::mutate(value=shape/rate)) +
+    geom_line(aes(x=coverage_start, y=value))
 
 
-    pdf(file="baseline.pdf", width=40, height=10)
-      chr = "chr12"
-      p = ggplot(baseline_df.extended %>% dplyr::filter(seqnames==chr)) +
-        geom_area(aes(y=score, x=start, fill="pileup"), stat="identity", data=sample_df.coverage %>% dplyr::filter(seqnames==chr), alpha=0.8) +
-        # geom_line(aes(y=score, x=start, color="pileup"), data=sample_df_chr.coverage, alpha=0.8) +
-        geom_line(aes(y=coverage_smooth, x=start, color="smooth"), alpha=0.8) +
-        coord_cartesian(ylim=c(0, 100)) +
-        scale_color_manual(values=ggplot.colors) +
-        scale_fill_manual(values=ggplot.colors) +
-        scale_x_continuous(breaks=scale_breaks) +
-        facet_wrap(~seqnames, scales="free_x", ncol=5)
-      print(p)
-    dev.off()
+  ggplot(x %>% reshape2::melt(measure.vars=c("shape", "rate"))) +
+    geom_line(aes(x=coverage_start, y=value)) +
+    facet_wrap(~variable, scale="free", ncol=1)
+
+  x = control_df.baseline %>%
+    dplyr::filter(!is_filled & coverage_smooth<100) %>%
+    dplyr::mutate(coverage_smooth_cut=cut(coverage_smooth, 100)) %>%
+    dplyr::group_by(coverage_smooth_cut) %>%
+    dplyr::summarise(q=quantile(coverage_smooth - coverage, 0.9), coverage_smooth_min=min(coverage_smooth)) %>%
+    dplyr::filter(q>0)
+  ggplot(x) +
+    geom_smooth(aes(coverage_smooth_min, q)) +
+    coord_cartesian(ylim=c(0, 10))
+
+  ggplot(control_df.baseline %>% dplyr::filter(!is_filled & coverage_smooth<100 & abs(coverage_smooth - coverage)<100)) +
+    geom_density_2d_filled(aes(coverage_smooth, coverage_smooth - coverage), bins=100)
+
+  plot(control_df.baseline$coverage, control_df.baseline$coverage_smooth - control_df.baseline$coverage)
+  control_df.baseline$coverage_smooth - control_df.baseline$coverage
+  control_df.baseline$score
+  #
+  # Y1 <- 100
+  # set.seed(101)
+  # x.pois<-rpois(Y1, 20)
+  # hist(x.pois, breaks=100,freq=FALSE)
+  # lines(density(x.pois, bw=0.8), col="red")
+  # library(MASS)
+  # (my.mle<-fitdistr(x.pois, densfun="poisson"))
+  # ##      lambda
+  # ##   20.6700000
+  # ##  ( 0.4546427)
+  # BIC(my.mle)
 
 
+  pdf(file="reports/control_estimated_noise.pdf", width=20, height=20)
+  # my.mle = MASS::fitdistr(x$score, densfun="gamma")
+
+  # x.poi<-rpois(n=1e6,lambda=7.433379128)
+  # x.poi<-rgamma(n=1e5, shape=3.258554685, rate=0.438367973)
+  # plot(density(x.poi, bw=1), xlim=c(0,70))
+
+  x = control_df.baseline %>%
+    dplyr::mutate(residual=coverage-coverage_smooth) %>%
+    dplyr::filter(coverage>0) %>%
+    dplyr:::filter(dplyr::between(residual, quantile(residual, 0.01), quantile(residual, 0.99)))
+
+  shape = 3.258554685
+  rate = 0.438367973
+  mean = mean(x$coverage)
+  sd = sd(x$coverage)
+  shape1 = mean^2/sd^2
+  rate1 = mean/sd^2
+  shape1 = 3.0
+  rate1 = 0.441
+  ggplot(x) +
+    geom_density(aes(x=coverage)) +
+    geom_line(aes(x=coverage, y=density, color="gamma"), data=with(density(rgamma(n=1e5, shape=shape, rate=rate), from=min(x$coverage, na.rm=T), to=max(x$coverage, na.rm=T)), data.frame(coverage=x, density=y))) +
+    geom_line(aes(x=coverage, y=density, color="gamma1"), data=with(density(rgamma(n=1e5, shape=shape1, rate=rate1), from=min(x$coverage, na.rm=T), to=max(x$coverage, na.rm=T)), data.frame(coverage=x, density=y)))
+
+  ggplot(x) +
+    geom_density(aes(x=residual)) +
+    coord_cartesian(xlim=c(-23, 23))
+
+  dev.off()
 
   if(F) {
+    pdf(file="reports/raw_control_vs_sample.pdf", width=10, height=80)
+      chr = paste0("chr", 1:19)
+      d = dplyr::bind_rows(control_df.coverage %>% dplyr::mutate(break_exp_condition="Control"), sample_df.coverage %>% dplyr::mutate(break_exp_condition="Sample"))
+      p = ggplot(d %>% dplyr::filter(seqnames %in% chr)) +
+        ggridges::geom_ridgeline(aes(y=break_exp_condition, x=start, height=score, fill=break_exp_condition), scale=0.1) +
+        ggridges::geom_ridgeline(aes(y=break_exp_condition, x=start, height=score), scale=0.1, data=control_df.baseline %>% dplyr::filter(seqnames %in% chr), color="#FF0000") +
+        coord_cartesian(ylim=c(0, 50)) +
+        scale_x_continuous(breaks=scale_breaks) +
+        facet_wrap(~seqnames, scales="free_x", ncol=1)
+      print(p)
+    dev.off()
 
-    pdf(file="baseline.pdf", width=20, height=15)
-    ggplot.colors = c("pileup"="#333333", "smooth"="#FF0000")
-    ggplot(baseline_df.extended) +
-      geom_bar(aes(y=score, x=start, fill="pileup"), stat="identity", data=sample_df.coverage) +
-      geom_line(aes(y=coverage_smooth, x=start, color="smooth")) +
-      coord_cartesian(ylim=c(0, 100)) +
-      scale_color_manual(values=ggplot.colors) +
-      scale_fill_manual(values=ggplot.colors) +
-      scale_x_continuous(breaks=scale_breaks) +
-      facet_wrap(~seqnames, scales="free_x", ncol=4)
-
-    for(chr in paste0("chr", 1:19)) {
-      sample_df_chr.coverage = sample_df.coverage %>% dplyr::filter(seqnames==chr)
-      baseline_df_chr.extended = baseline_df.extended %>% dplyr::filter(seqnames==chr)
-      p = ggplot(baseline_df_chr.extended) +
-        # geom_bar(aes(y=score, x=start, fill="pileup"), stat="identity", data=sample_df_chr.coverage, alpha=0.8) +
-        geom_area(aes(y=score, x=start, fill="pileup"), stat="identity", data=sample_df_chr.coverage, alpha=0.8) +
-        # geom_line(aes(y=score, x=start, color="pileup"), data=sample_df_chr.coverage, alpha=0.8) +
+    pdf(file="reports/baseline.pdf", width=10, height=80)
+      chr = paste0("chr", 1:19)
+      ggplot.colors = c("pileup"="#333333", "smooth"="#FF0000")
+      p = ggplot(control_df.baseline %>% dplyr::filter(seqnames %in% chr)) +
+        geom_area(aes(y=score, x=start, fill="pileup"), stat="identity", data=control_df.coverage %>% dplyr::filter(seqnames %in% chr), alpha=0.8) +
         geom_line(aes(y=coverage_smooth, x=start, color="smooth"), alpha=0.8) +
         coord_cartesian(ylim=c(0, 100)) +
         scale_color_manual(values=ggplot.colors) +
         scale_fill_manual(values=ggplot.colors) +
         scale_x_continuous(breaks=scale_breaks) +
-        facet_wrap(~seqnames, scales="free_x", ncol=5)
+        facet_wrap(~seqnames, scales="free_x", ncol=1)
       print(p)
-    }
     dev.off()
   }
-
-  # write data to disc
-  readr::write_tsv(baseline_df.extended %>% dplyr::select(seqnames, start, end, coverage_smooth), baseline_bdg_path, col_names=F)
 
 
   # Call peaks
@@ -452,12 +514,24 @@ main = function() {
     dplyr::left_join(offtarget2junctions.map, by="break_id") %>%
     dplyr::mutate(is_near_bait=tidyr::replace_na(is_near_bait, F))
 
+  #
+  # Calculate normalization accross experiment
+  #
+  scale_factor_df = junctions_df %>%
+    dplyr::filter(!grepl("chrX|chrY", break_bait_chrom)) %>%
+    dplyr::group_by(break_exp_condition, break_bait_chrom) %>%
+    dplyr::summarise(libsize=n()) %>%
+    dplyr::mutate(libsize_median=median(libsize)) %>%
+    dplyr::mutate(scale_factor=libsize_median/libsize) %>%
+    dplyr::select(break_exp_condition, break_bait_chrom, scale_factor)
+  junctions_df = junctions_df %>%
+    dplyr::select(-dplyr::matches("scale_factor")) %>%
+    dplyr::inner_join(scale_factor_df, by=c("break_exp_condition", "break_bait_chrom"))
 
 
-
-  macs2_params = list(extsize=1e5, llocal=1e8, slocal=2e6, qvalue_cutoff=0.05, peak_max_gap=1e5, peak_min_length=20)
-  sample_df = junctions_df %>% dplyr::filter(!grepl("chrX|chrY", break_bait_chrom) & break_exp_condition=="Sample")
-  control_df = junctions_df %>% dplyr::filter(!grepl("chrX|chrY", break_bait_chrom) & break_exp_condition=="Control")
+  # macs2_params = list(extsize=1e5, llocal=1e8, slocal=2e6, qvalue_cutoff=0.05, peak_max_gap=1e5, peak_min_length=20)
+  sample_df = junctions_df %>% dplyr::filter(break_exp_condition=="Sample")
+  control_df = junctions_df %>% dplyr::filter(break_exp_condition=="Control")
   p = call_peaks(sample_df, control_df)
 
 
@@ -698,3 +772,44 @@ ggplot() +
   geom_point(aes(y=bait_chrom, x=offtarget_start, color=bait_chrom), data=offtargets_df, size=5, alpha=0.5) +
   facet_wrap(~break_exp_condition)
 }
+
+
+
+
+  #
+  # sample_sizes = sample_df.coverage %>%
+  #   dplyr::group_by(seqnames) %>%
+  #   dplyr::summarise(sample_start=min(start[score>=quantile(score, 0.05)], na.rm=T), sample_end=max(end[score>quantile(score, 0.05)], na.rm=T)) %>%
+  #   dplyr::select(seqnames, sample_start, sample_end)
+  #
+  # #
+  # # Calculate baseline
+  # #
+  # control_ranges.bins = unlist(tileGenome(mm9, tilewidth=binsize))
+  # control_ranges.bins$coverage = GenomicRanges::countOverlaps(control_ranges.bins, control_ranges.extended)
+  # baseline_df.extended = data.table::as.data.table(control_ranges.bins) %>%
+  #   # dplyr::inner_join(sample_sizes, by="seqnames") %>%
+  #   # dplyr::filter(start>=sample_start & end<=sample_end) %>%
+  #   dplyr::arrange(seqnames, start) %>%
+  #   dplyr::group_by(seqnames) %>%
+  #   dplyr::mutate(is_q2=coverage>quantile(coverage, 0.2), is_q8=coverage<quantile(coverage, 0.8), is_inner_quantile=is_q2 & is_q8) %>%
+  #   dplyr::mutate(coverage_median=median(coverage[is_inner_quantile], na.rm=T), coverage_sd=sd(coverage[is_inner_quantile], na.rm=T)) %>%
+  #   dplyr::mutate(coverage_min=coverage_median-2*coverage_sd) %>%
+  #   dplyr::mutate(coverage_mod=ifelse(coverage<coverage_min, NA_real_, coverage)) %>%
+  #   dplyr::mutate(coverage_mod=zoo::na.fill(coverage_mod, "extend")) %>%
+  #   dplyr::do((function(z){
+  #     zz<<-z
+  #     # asdsad()
+  #     x = matrix(as.numeric(z$coverage_mod), nrow=1)
+  #     colnames(x) = z$start
+  #     bc.irls = baseline::baseline(x, method="medianWindow", hws=1e6/binsize, hwm=1e6/binsize) # !!!!
+  #     # bc.irls = baseline::baseline(x, method="medianWindow", hws=2e6/binsize, hwm=5e6/binsize) # !!!!
+  #     # bc.irls = baseline(x, method="rollingBall", wm=1e6/binsize, ws=2e6/binsize)
+  #     # bc.irls = baseline::baseline(x, method="irls", lambda1=7, lambda2=13) # 1e2
+  #     # bc.irls = baseline::baseline(x, method="irls" lambda1=5, lambda2=10)
+  #     # bc.irls = baseline::baseline(x, method="irls", lambda1=4, lambda2=9) # For binsize = 1e4 / extend = 1e5 !!!!!
+  #     # bc.irls = baseline::baseline(x, method="irls", lambda1=3, lambda2=7) # For binsize = 1e4 / extend = 1e5 !!!!!
+  #     z$coverage_smooth = as.numeric(bc.irls@baseline)
+  #     z
+  #   })(.)) %>%
+  #   dplyr::ungroup()
