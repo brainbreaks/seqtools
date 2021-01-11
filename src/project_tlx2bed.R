@@ -87,7 +87,7 @@ calculate_coverage = function(ranges, mm9, extend) {
 
 call_peaks = function(sample_df, control_df=NULL, debug=F) {
   binsize = 1e3
-  binstep = 1e3
+  binstep = 5e2
   extend = 1e5
   llocal = 6e6
   peaks_minqvalue=-log10(0.01)
@@ -164,7 +164,7 @@ call_peaks = function(sample_df, control_df=NULL, debug=F) {
       colnames(x) = z$start
       # 5e6 - good and smooth, 1e6 little more precise
       bc.irls = baseline::baseline(x, method="medianWindow", hws=5e6/binstep, hwm=5e6/binstep) # !!!!
-      # bc.irls = baseline::baseline(x, method="medianWindow", hws=2e6/binsize, hwm=5e6/binsize) # !!!!
+      # bc.irls = baseline::baseline(x, method="medianWindow", hws=2e6/binstep, hwm=5e6/binstep) # !!!!
       # bc.irls = baseline(x, method="rollingBall", wm=1e6/binsize, ws=2e6/binsize)
       # bc.irls = baseline::baseline(x, method="irls", lambda1=7, lambda2=13) # 1e2
       # bc.irls = baseline::baseline(x, method="irls" lambda1=5, lambda2=10)
@@ -183,7 +183,7 @@ call_peaks = function(sample_df, control_df=NULL, debug=F) {
     p = ggplot() +
       geom_area(aes(y=coverage, x=start, fill="pileup"), stat="identity", data=control_tiles_df.coverage %>% dplyr::filter(seqnames %in% chr), alpha=0.8) +
       geom_line(aes(y=coverage_smooth, x=start, color="smooth"), data=control_df.baseline %>% dplyr::filter(seqnames %in% chr), alpha=0.8) +
-      #coord_cartesian(ylim=c(0, 100)) +
+      coord_cartesian(ylim=c(0, 50)) +
       scale_color_manual(values=ggplot.colors) +
       scale_fill_manual(values=ggplot.colors) +
       scale_x_continuous(breaks=scale_breaks) +
