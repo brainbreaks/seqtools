@@ -131,7 +131,7 @@ call_peaks = function(sample_df, control_df=NULL, debug=F) {
 
   control_ranges = GenomicRanges::makeGRangesFromDataFrame(control_df, end.field="break_end", start.field="break_start", strand.field="break_strand", seqnames.field="break_chrom", keep.extra.columns=T)
   control_tiles_df.coverage = calculate_coverage2(control_ranges, mm9, extend=extend, binsize=binsize, binstep=binstep)
-  readr::write_tsv(control_tiles_df.coverage %>% dplyr::select(seqnames, start, end, coverage), "data/macs2/Control_tile.bdg", col_names=F)
+  readr::write_tsv(control_tiles_df.coverage %>% dplyr::select(seqnames, start, end, coverage), control_bdg_path, col_names=F)
 
   #control_df.coverage = calculate_coverage(sample_ranges, mm9, extend)
   #readr::write_tsv(control_df.coverage %>% dplyr::select(seqnames, start, end, coverage), control_bdg_path, col_names=F)
@@ -148,6 +148,20 @@ call_peaks = function(sample_df, control_df=NULL, debug=F) {
   sample_df.coverage = calculate_coverage(sample_ranges, mm9, extend)
   readr::write_tsv(sample_df.coverage %>% dplyr::select(seqnames, start, end, coverage), sample_bdg_path, col_names=F)
 
+  fit_baseline = function(z) {
+    zz<<-z
+    x = matrix(as.numeric(z$coverage_mod), nrow=1)
+    colnames(x) = z$start
+    bc.irls = baseline::baseline(x, method="medianWindow", hws=5e6/binstep, hwm=5e6/binstep) # !!!!
+    z.coverage_smooth = as.numeric(bc.irls@baseline)
+    # bc.irls = baseline::baseline(x, method="medianWindow", hws=5e6/binstep, hwm=4e6/binstep) # !!!!
+    # z.coverage_smooth2 = as.numeric(bc.irls@baseline)
+
+    cbind(z[c("seqnames", "start", "end", "coverage", "coverage_mod")], coverage_smooth=z.coverage_smooth)
+  }
+
+  # cluster = multidplyr::new_cluster(20)
+  # multidplyr::cluster_assign(cluster, fit_baseline=fit_baseline)
   control_df.baseline = control_tiles_df.coverage %>%
     dplyr::mutate(break_exp_condition="Control") %>%
     dplyr::arrange(seqnames, start) %>%
@@ -157,39 +171,56 @@ call_peaks = function(sample_df, control_df=NULL, debug=F) {
     dplyr::mutate(coverage_min=coverage_median-2*coverage_sd) %>%
     dplyr::mutate(coverage_mod=ifelse(coverage<coverage_min, NA_real_, coverage)) %>%
     dplyr::mutate(is_filled=is.na(coverage_mod), coverage_mod=zoo::na.fill(coverage_mod, "extend")) %>%
-    dplyr::do((function(z){
-      zz<<-z
-      # asdsad()
-      x = matrix(as.numeric(z$coverage_mod), nrow=1)
-      colnames(x) = z$start
-      # 5e6 - good and smooth, 1e6 little more precise
-      bc.irls = baseline::baseline(x, method="medianWindow", hws=5e6/binstep, hwm=5e6/binstep) # !!!!
-      # bc.irls = baseline::baseline(x, method="medianWindow", hws=2e6/binstep, hwm=5e6/binstep) # !!!!
-      # bc.irls = baseline(x, method="rollingBall", wm=1e6/binsize, ws=2e6/binsize)
-      # bc.irls = baseline::baseline(x, method="irls", lambda1=7, lambda2=13) # 1e2
-      # bc.irls = baseline::baseline(x, method="irls" lambda1=5, lambda2=10)
-      # bc.irls = baseline::baseline(x, method="irls", lambda1=4, lambda2=9) # For binsize = 1e4 / extend = 1e5 !!!!!
-      # bc.irls = baseline::baseline(x, method="irls", lambda1=3, lambda2=7) # For binsize = 1e4 / extend = 1e5 !!!!!
-      z$coverage_smooth = as.numeric(bc.irls@baseline)
-      z
-    })(.)) %>%
+    dplyr::do(fit_baseline(.)) %>%
     dplyr::ungroup()
+  class(control_tiles_df.coverage) = c("tbl_df", "tbl", "data.frame")
   readr::write_tsv(control_df.baseline %>% dplyr::select(seqnames, start, end, coverage_smooth), baseline_bdg_path, col_names=F)
 
+  control_df.significant = control_df.baseline %>%
+    dplyr::rowwise() %>%
+    dplyr::mutate(pvalue=pgamma(coverage, coverage_smooth, 1, lower.tail=F))
+
+  # Call peaks
+  readr::write_tsv(control_df.baseline %>% dplyr::select(seqnames, start, end, coverage), sample_bdg_path, col_names=F)
+  readr::write_tsv(control_df.baseline %>% dplyr::select(seqnames, start, end, coverage_smooth), baseline_bdg_path, col_names=F)
+  system(stringr::str_glue("macs2 bdgcmp -t {input} -c {noise} -m qpois -o {output}", input=sample_bdg_path, noise=baseline_bdg_path, output=qvalue_path))
+  system(stringr::str_glue("macs2 bdgpeakcall -i {qvalue} -c {cutoff} --min-length {format(peak_min_length, scientific=F)} --max-gap {format(peak_max_gap, scientific=F)} -o {output}",
+       qvalue=qvalue_path, output=peaks_path, cutoff=peaks_minqvalue, peak_max_gap=peaks_maxgap, peak_min_length=peaks_minlen))
+
+  # Read results file
+  peaks_cols = cols(
+    peak_chrom=col_character(), peak_start=col_double(), peak_end=col_double(), peak_length=col_character(), peak_abs_summit=col_double(),
+    peak_score=col_character(), peak_fc=col_double(), peak_pvalue_log10=col_double(), peak_qvalue_log10=col_double(), peak_sammit_offset=col_double()
+  )
+  qvalue_cols = cols(qvalue_chrom=col_character(), qvalue_start=col_double(), qvalue_end=col_double(), qvalue_score=col_double())
+  qvalues_df = readr::read_tsv(qvalue_path, col_names=names(qvalue_cols$cols), col_types=qvalue_cols) %>%
+    dplyr::mutate(qvalue_id=1:n())
+  peaks_df = readr::read_tsv(peaks_path, skip=1, col_names=names(peaks_cols$cols), col_types=peaks_cols) %>%
+    dplyr::mutate(peak_summit_pos=peak_start + peak_sammit_offset) %>%
+    dplyr::mutate(peak_id=1:n())
+
+
   if(debug) {
-  pdf(file="reports/baseline_5e6_2.pdf", width=10, height=10)
-    ggplot.colors = c("pileup"="#333333", "smooth"="#FF0000")
-    chr = "chr16"
-    p = ggplot() +
-      geom_area(aes(y=coverage, x=start, fill="pileup"), stat="identity", data=control_tiles_df.coverage %>% dplyr::filter(seqnames %in% chr), alpha=0.8) +
-      geom_line(aes(y=coverage_smooth, x=start, color="smooth"), data=control_df.baseline %>% dplyr::filter(seqnames %in% chr), alpha=0.8) +
-      coord_cartesian(ylim=c(0, 50)) +
-      scale_color_manual(values=ggplot.colors) +
-      scale_fill_manual(values=ggplot.colors) +
-      scale_x_continuous(breaks=scale_breaks) +
-      facet_wrap(~seqnames, scales="free_x", ncol=1)
-    print(p)
-  dev.off()
+    pdf(file="reports/baseline_5e6_6.pdf", width=15, height=4)
+      control_tiles_df.coverage_sample = control_tiles_df.coverage %>% dplyr::sample_frac(0.2)
+      for(chr in paste0("chr", 1:19)) {
+        print(chr)
+        ggplot.colors = c("pileup"="#333333", "smooth"="#FF0000", "smooth2"="#00AA00", mypeak="#CCCCCC", macspeaks="#FF0000")
+        p = ggplot() +
+          # geom_hex(aes(y=coverage, x=start), data=control_tiles_df.coverage %>% dplyr::filter(dplyr::between(coverage, 2, 50) & seqnames %in% chr), bins=30) +
+          geom_point(aes(y=coverage, x=start), data=control_tiles_df.coverage_sample %>% dplyr::filter(dplyr::between(coverage, 0, 50) & seqnames %in% chr), alpha=0.05, size=0.5) +
+          geom_rect(aes(xmin=peak_start, ymin=-2, xmax=peak_end, ymax=-1, color="macspeaks"), data=peaks_df %>% dplyr::mutate(seqnames=peak_chrom) %>% dplyr::filter(seqnames %in% chr)) +
+          geom_rect(aes(xmin=start, ymin=-3, xmax=end, ymax=-2, color="mypeak"), data=control_df.significant %>% dplyr::filter(seqnames %in% chr & pvalue < 0.01)) +
+          geom_line(aes(y=coverage_smooth, x=start, color="smooth"), data=control_df.baseline %>% dplyr::filter(seqnames %in% chr), alpha=0.8) +
+          # geom_line(aes(y=coverage_smooth2, x=start, color="smooth2"), data=control_df.baseline %>% dplyr::filter(seqnames %in% chr), alpha=0.8) +
+          coord_cartesian(ylim=c(-5, 50)) +
+          scale_color_manual(values=ggplot.colors) +
+          scale_fill_manual(values=ggplot.colors) +
+          scale_x_continuous(breaks=scale_breaks) +
+          facet_wrap(~seqnames, scales="free_x", ncol=1)
+        print(p)
+      }
+    dev.off()
   }
 
 
@@ -197,7 +228,7 @@ call_peaks = function(sample_df, control_df=NULL, debug=F) {
 
 
 
-  x.raw = control_df.baseline %>%
+  cx.raw = control_df.baseline %>%
     dplyr::filter(!is_filled & coverage_smooth<1000) %>%
     dplyr::mutate(coverage_lo=floor(coverage_smooth), coverage_hi=ceiling(coverage_smooth)) %>%
     dplyr::group_by(coverage_lo, coverage_hi) %>%
