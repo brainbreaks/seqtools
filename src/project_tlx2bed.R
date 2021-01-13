@@ -236,14 +236,44 @@ call_peaks = function(sample_df, control_df=NULL, debug=F) {
     dplyr::mutate(pvalue=pgamma(coverage, coverage_smooth, 1, lower.tail=F), coverage_th01=qgamma(0.01, coverage_smooth, 1, lower.tail=F))
   readr::write_tsv(sample_df.baseline %>% dplyr::select(seqnames, start, end, coverage_smooth), sample_baseline_bdg_path, col_names=F)
 
-  x = macs_call_peaks(control_bdg_path, control_baseline_bdg_path)
-  y = macs_call_peaks(sample_bdg_path, sample_baseline_bdg_path)
+  control_peaks = macs_call_peaks(control_bdg_path, control_baseline_bdg_path)
+  sample_peaks = macs_call_peaks(sample_bdg_path, sample_baseline_bdg_path)
 
-  xx = GenomicRanges::makeGRangesFromDataFrame(x$peaks, end.field="peak_end", start.field="peak_start", seqnames.field="peak_chrom", keep.extra.columns=T)
-  yy = GenomicRanges::makeGRangesFromDataFrame(y$peaks, end.field="peak_end", start.field="peak_start", seqnames.field="peak_chrom", keep.extra.columns=T)
-  zz = as.data.frame(GenomicRanges::findOverlaps(xx, yy))
-  xxx = unique(zz$queryHits)
-  yyy = unique(zz$subjectHits)
+
+  if(debug) {
+    control_peaks_ranges = GenomicRanges::makeGRangesFromDataFrame(control_peaks$peaks, end.field="peak_end", start.field="peak_start", seqnames.field="peak_chrom", keep.extra.columns=T)
+    sample_peaks_ranges = GenomicRanges::makeGRangesFromDataFrame(sample_peaks$peaks, end.field="peak_end", start.field="peak_start", seqnames.field="peak_chrom", keep.extra.columns=T)
+    sample2control.map = as.data.frame(GenomicRanges::findOverlaps(control_peaks_ranges, sample_peaks_ranges))
+    x = sample_peaks$peaks %>%
+      dplyr::rename(peak_id.sample="peak_id") %>%
+      dplyr::full_join(sample2control.map %>% dplyr::rename(peak_id.control="queryHits"), by=c("peak_id.sample"="subjectHits")) %>%
+      dplyr::full_join(control_peaks$peaks, by=c("peak_id.control"="peak_id")) %>%
+      setNames(gsub("\\.x$", ".sample", colnames(.))) %>%
+      setNames(gsub("\\.y$", ".control", colnames(.)))
+
+    names.common_control = unique(x %>% dplyr::filter(!is.na(peak_id.control) & !is.na(peak_id.sample)) %>% .$peak_id.control)
+    names.common_sample = unique(x %>% dplyr::filter(!is.na(peak_id.control) & !is.na(peak_id.sample)) %>% .$peak_id.sample)
+    if(length(names.common_control) > length(names.common_sample)) { names.common = names.common_control } else { names.common = names.common_sample }
+    names.common  = paste("Common", names.common)
+    names.sample = c(paste("Sample", unique(x %>% dplyr::filter(is.na(peak_id.control) & !is.na(peak_id.sample)) %>% .$peak_id.sample)), names.common)
+    names.control = c(paste("Control", unique(x %>% dplyr::filter(!is.na(peak_id.control) & is.na(peak_id.sample)) %>% .$peak_id.control)), names.common)
+
+    # Chart
+    p = VennDiagram::venn.diagram(
+      x = list(names.sample, names.control),
+      category.names = c("Sample" , "Control"),
+      lwd = 2,
+      lty = 'blank',
+      fill = RColorBrewer::brewer.pal(3, "Pastel2")[1:2],
+      cat.cex = 2,
+      cat.fontface = "bold",
+      filename = NULL
+    )
+    jpeg("reports/control2sample_venn.jpg", width=400, height=400)
+    grid.draw(p)
+    dev.off()
+  }
+
 
   save(control_tiles_df.coverage, control_df.baseline, sample_tiles_df.coverage, sample_df.baseline, x, y, xx, yy, file="data.rda")
 
