@@ -10,23 +10,27 @@ library(doParallel)
 
 
 
-ggplot_karyoplot = function(coverage_df, baselne_df, peaks_df, bait_enrichemnt_df) {
+ggplot_karyoplot = function(coverage_df=NULL, baselne_df=NULL, peaks_df=NULL, bait_enrichemnt_df=NULL) {
   ggplot.colors = c("pileup"="#333333", "smooth"="#FF0000", "smooth2"="#00AA00", mypeak="#CCCCCC", macspeaks="#FF0000", enriched="#0000FF")
   p = ggplot() +
     # geom_hex(aes(y=coverage, x=start), data=coverage_df %>% dplyr::filter(dplyr::between(coverage, 2, 50) & seqnames %in% chr), bins=30) +
-    geom_point(aes(y=coverage, x=start), data=coverage_df %>% dplyr::filter(dplyr::between(coverage, 0, 50)), alpha=0.01) +
-    geom_rect(aes(xmin=peak_start, ymin=-2, xmax=peak_end, ymax=-1, fill="macspeaks"), data=peaks_df) +
-    geom_rect(aes(xmin=start, ymin=-3, xmax=end, ymax=-2, fill="mypeak"), data=baselne_df %>% dplyr::filter(pvalue < 0.01)) +
     #geom_rect(aes(xmin=peak_start, ymin=-5-break_bait_chrom_number, xmax=peak_end, ymax=-4-break_bait_chrom_number, fill="enriched"), data=peak_enrichment.significant %>% dplyr::mutate(seqnames=peak_chrom) %>% dplyr::filter(seqnames %in% chr)) +
-    geom_text(aes(x=peak_start, y=-5-break_bait_chrom_number, label=gsub("chr", "", break_bait_chrom)), data=bait_enrichemnt_df, size=3) +
-    geom_line(aes(y=coverage_smooth, x=start, color="smooth"), data=baselne_df, alpha=0.8) +
-    geom_line(aes(y=coverage_th01, x=start, color="smooth"), data=baselne_df, linetype="dashed", alpha=0.8) +
     coord_cartesian(ylim=c(-25, 50)) +
     scale_color_manual(values=ggplot.colors) +
     scale_fill_manual(values=ggplot.colors) +
     scale_x_continuous(breaks=scale_breaks) +
     facet_wrap(~seqnames, scales="free_x", ncol=1) +
     labs(x="")
+
+    if(!is.null(coverage_df)) { p = p + geom_point(aes(y=coverage, x=start), data=coverage_df %>% dplyr::filter(dplyr::between(coverage, 0, 50)), alpha=0.01) }
+    if(!is.null(peaks_df)) { p = p + geom_rect(aes(xmin=peak_start, ymin=-2, xmax=peak_end, ymax=-1, fill="macspeaks"), data=peaks_df) }
+    if(!is.null(baselne_df)) {
+      p = p + geom_rect(aes(xmin=start, ymin=-3, xmax=end, ymax=-2, fill="mypeak"), data=baselne_df %>% dplyr::filter(pvalue < 0.01))
+      p = p + geom_line(aes(y=coverage_smooth, x=start, color="smooth"), data=baselne_df, alpha=0.8)
+      p = p + geom_line(aes(y=coverage_th01, x=start, color="smooth"), data=baselne_df, linetype="dashed", alpha=0.8)
+    }
+    if(!is.null(bait_enrichemnt_df)) { p = p + geom_text(aes(x=peak_start, y=-5-break_bait_chrom_number, label=gsub("chr", "", break_bait_chrom)), data=bait_enrichemnt_df, size=3) }
+
   p
 }
 
@@ -317,6 +321,55 @@ call_peaks = function(sample_df, control_df=NULL, debug=F) {
   #  dplyr::group_by(seqnames, start, end) %>%
   #  dplyr::summarise(coverage=tidyr::replace_na(max(coverage), 0))
   #readr::write_tsv(control_tiles_df.coverage %>% dplyr::select(seqnames, start, end, coverage), "data/macs2/Control_tile.bdg", col_names=F)
+
+
+
+  baselines = data.frame()
+  coverages = data.frame()
+  chr_all = paste0("chr", 1:19)
+  for(chr in chr_all) {
+    control_ranges = GenomicRanges::makeGRangesFromDataFrame(control_df %>% dplyr::mutate(scale_factor=1L) %>% dplyr::filter(break_bait_chrom==chr), end.field="break_end", start.field="break_start", strand.field="break_strand", seqnames.field="break_chrom", keep.extra.columns=T)
+    control_tiles_df.coverage = calculate_coverage2(control_ranges, mm9, extend=extend, binsize=binsize, binstep=binstep)
+
+    sample_ranges = GenomicRanges::makeGRangesFromDataFrame(sample_df %>% dplyr::mutate(scale_factor=1L) %>% dplyr::filter(break_bait_chrom==chr), end.field="break_end", start.field="break_start", strand.field="break_strand", seqnames.field="break_chrom", keep.extra.columns=T)
+    sample_tiles_df.coverage = calculate_coverage2(sample_ranges, mm9, extend=extend, binsize=binsize, binstep=binstep)
+
+    coverages = dplyr::bind_rows(
+      coverages,
+      sample_tiles_df.coverage %>% dplyr::mutate(break_exp_condition="Control", break_bait_chrom=chr),
+      control_tiles_df.coverage %>% dplyr::mutate(break_exp_condition="Sample", break_bait_chrom=chr)
+    )
+
+    # control_df.baseline = fit_baseline(control_tiles_df.coverage, binstep=binstep, binwidth=1e6) %>%
+    #   dplyr::rowwise() %>%
+    #   dplyr::mutate(pvalue=pgamma(coverage, shape=coverage_smooth, rate=1, lower.tail=F), coverage_th01=qgamma(0.01, coverage_smooth, 1, lower.tail=F))
+    # sample_df.baseline = fit_baseline(sample_tiles_df.coverage, binstep=binstep, binwidth=1e6) %>%
+    #   dplyr::rowwise() %>%
+    #   dplyr::mutate(pvalue=pgamma(coverage, shape=coverage_smooth, rate=1, lower.tail=F), coverage_th01=qgamma(0.01, coverage_smooth, 1, lower.tail=F))
+    # baselines = dplyr::bind_rows(
+    #   baselines,
+    #   sample_df.baseline %>% dplyr::mutate(break_exp_condition="Control", break_bait_chrom=chr),
+    #   control_df.baseline %>% dplyr::mutate(break_exp_condition="Sample", break_bait_chrom=chr)
+    # )
+  }
+
+    pdf("test2.pdf", width=40, height=80)
+    ggplot2::ggplot(coverages %>% dplyr::filter(seqnames=="chr1")) +
+      # ggridges::geom_ridgeline(aes(y=seqnames, x=start, height=coverage_smooth, color=break_exp_condition), fill="#00000000") +
+      ggplot2::geom_line(aes(x=start, y=coverage, color=break_exp_condition), alpha=0.5) +
+      ggplot2::coord_cartesian(ylim=c(0, 50)) +
+      ggplot2::scale_x_continuous(breaks=scale_breaks) +
+      ggplot2::facet_wrap(~break_bait_chrom, ncol=1) +
+      ggplot2::labs(x="")
+    dev.off()
+
+    chr1 = "chr13"
+    p = ggplot_karyoplot(
+      coverage_df=control_tiles_df.coverage %>% dplyr::filter(seqnames %in% chr1),
+      baselne_df=control_df.baseline %>% dplyr::filter(seqnames %in% chr1)
+    )
+    print(p)
+
 
 
 
@@ -982,12 +1035,6 @@ all_islands_cross = all_islands.f %>%
   dplyr::filter(dplyr::between(peak_start.x, peak_start.y, peak_end.y) | dplyr::between(peak_start.y, peak_start.x, peak_end.x))
 
   # +
-
-ggplot() +
-  ggridges::geom_density_ridges(aes(y=break_chrom, x=peak_start.x, color=break_bait_chrom.x), bandwidth=1e5, data=all_islands_cross, alpha=0.1) +
-  geom_point(aes(y=bait_chrom, x=offtarget_start, color=bait_chrom), data=offtargets_df, size=5, alpha=0.5) +
-  facet_wrap(~break_exp_condition)
-}
 
 
 
