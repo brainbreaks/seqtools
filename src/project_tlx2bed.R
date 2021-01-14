@@ -10,26 +10,49 @@ library(doParallel)
 
 
 
-ggplot_karyoplot = function(coverage_df=NULL, baselne_df=NULL, peaks_df=NULL, bait_enrichemnt_df=NULL) {
-  ggplot.colors = c("pileup"="#333333", "smooth"="#FF0000", "smooth2"="#00AA00", mypeak="#CCCCCC", macspeaks="#FF0000", enriched="#0000FF")
+ggplot_karyoplot = function(coverage_df=NULL, baseline_df=NULL, peaks_df=NULL, bait_enrichemnt_df=NULL, max_coverage="auto") {
+  ggplot.colors = c(mypeak="#CCCCCC", macspeaks="#FF0000", enriched="#0000FF", Control="#000000", Sample="#FF0000", Coverage="#000000", "Control baseline"="#0000FF", "Sample baseline"="#00FF00", "Coverage baseline"="#FF0000")
+
+  if(max_coverage=="auto") {
+    if(!is.null(baseline_df)) { max_coverage = median(baseline_df$coverage_smooth)*8 } else {
+      if(!is.null(baseline_df)) { max_coverage = median(coverage_df$coverage)*8 } else {
+        max_coverage = 50
+      }
+    }
+  }
+
+
   p = ggplot() +
-    # geom_hex(aes(y=coverage, x=start), data=coverage_df %>% dplyr::filter(dplyr::between(coverage, 2, 50) & seqnames %in% chr), bins=30) +
+    # geom_hex(aes(y=coverage, x=start), data=coverage_df %>% dplyr::filter(dplyr::between(coverage, 2, max_coverage) & seqnames %in% chr), bins=30) +
     #geom_rect(aes(xmin=peak_start, ymin=-5-break_bait_chrom_number, xmax=peak_end, ymax=-4-break_bait_chrom_number, fill="enriched"), data=peak_enrichment.significant %>% dplyr::mutate(seqnames=peak_chrom) %>% dplyr::filter(seqnames %in% chr)) +
-    coord_cartesian(ylim=c(-25, 50)) +
+    coord_cartesian(ylim=c(ifelse(is.null(bait_enrichemnt_df), -4, -25), max_coverage)) +
     scale_color_manual(values=ggplot.colors) +
-    scale_fill_manual(values=ggplot.colors) +
     scale_x_continuous(breaks=scale_breaks) +
     facet_wrap(~seqnames, scales="free_x", ncol=1) +
     labs(x="")
 
-    if(!is.null(coverage_df)) { p = p + geom_point(aes(y=coverage, x=start), data=coverage_df %>% dplyr::filter(dplyr::between(coverage, 0, 50)), alpha=0.01) }
-    if(!is.null(peaks_df)) { p = p + geom_rect(aes(xmin=peak_start, ymin=-2, xmax=peak_end, ymax=-1, fill="macspeaks"), data=peaks_df) }
-    if(!is.null(baselne_df)) {
-      p = p + geom_rect(aes(xmin=start, ymin=-3, xmax=end, ymax=-2, fill="mypeak"), data=baselne_df %>% dplyr::filter(pvalue < 0.01))
-      p = p + geom_line(aes(y=coverage_smooth, x=start, color="smooth"), data=baselne_df, alpha=0.8)
-      p = p + geom_line(aes(y=coverage_th01, x=start, color="smooth"), data=baselne_df, linetype="dashed", alpha=0.8)
+  if(!is.null(coverage_df)) {
+    coverage_df = coverage_df %>% dplyr::mutate(coverage_limited=ifelse(coverage>max_coverage, max_coverage, coverage))
+    if(!("break_exp_condition" %in% colnames(coverage_df))) {
+      coverage_df$break_exp_condition = "Coverage"
     }
-    if(!is.null(bait_enrichemnt_df)) { p = p + geom_text(aes(x=peak_start, y=-5-break_bait_chrom_number, label=gsub("chr", "", break_bait_chrom)), data=bait_enrichemnt_df, size=3) }
+    coverage_df$break_exp_condition_number = as.numeric(as.factor(coverage_df$break_exp_condition))
+    p = p + geom_point(aes(y=coverage_limited, x=start, color=break_exp_condition), data=coverage_df, alpha=0.01, size=1)
+    p = p + geom_rect(aes(xmin=start, xmax=end, fill=coverage, ymin=-3-break_exp_condition_number, ymax=-2-break_exp_condition_number), data=coverage_df)
+  }
+  if(!is.null(peaks_df) & nrow(peaks_df)>0) { p = p + geom_rect(aes(xmin=peak_start, xmax=peak_end, color="macspeaks"), ymin=-2, ymax=-1, data=peaks_df) }
+  if(!is.null(baseline_df)) {
+    baseline_df.sign = baseline_df %>% dplyr::filter(pvalue < 0.01)
+    if(nrow(baseline_df.sign)>0) {
+      p = p + geom_rect(aes(xmin=start, xmax=end, color="mypeak"), ymin=-3, ymax=-2, data=baseline_df.sign)
+    }
+
+    if(!("break_exp_condition" %in% colnames(baseline_df))) { baseline_df$break_exp_condition = "Coverage" }
+    baseline_df$break_exp_condition = paste(baseline_df$break_exp_condition, "baseline")
+    p = p + geom_line(aes(y=coverage_smooth, x=start, color=break_exp_condition), data=baseline_df, alpha=0.8)
+    p = p + geom_line(aes(y=coverage_th01, x=start, color=break_exp_condition), data=baseline_df, linetype="dashed", alpha=0.8)
+  }
+  if(!is.null(bait_enrichemnt_df)) { p = p + geom_text(aes(x=peak_start, y=-5-break_bait_chrom_number, label=gsub("chr", "", break_bait_chrom)), data=bait_enrichemnt_df, size=3) }
 
   p
 }
@@ -55,11 +78,11 @@ macs_call_peaks = function(sample_bdg_path, baseline_bdg_path) {
     dplyr::mutate(peak_summit_pos=peak_start + peak_sammit_offset)
   if(nrow(peaks_df)>0) {
     peaks_df = peaks_df %>% dplyr::mutate(peak_id=1:n())
-    qvalues_ranges = GenomicRanges::makeGRangesFromDataFrame(qvalues_df, end.field="qvalue_end", start.field="qvalue_start", seqnames.field="qvalue_chrom", keep.extra.columns=T)
-    summit_ranges = GenomicRanges::makeGRangesFromDataFrame(peaks_df, end.field="peak_summit_pos", start.field="peak_summit_pos", seqnames.field="peak_chrom", keep.extra.columns=T)
+    qvalues_ranges = GenomicRanges::makeGRangesFromDataFrame(qvalues_df %>% dplyr::mutate(end=qvalue_end, start=qvalue_start, seqnames=qvalue_chrom), keep.extra.columns=T)
+    summit_ranges = GenomicRanges::makeGRangesFromDataFrame(peaks_df %>% dplyr::mutate(end=peak_summit_pos, start=peak_summit_pos, seqnames=peak_chrom), keep.extra.columns=T)
     summit2qvalue.map = as.data.frame(IRanges::mergeByOverlaps(qvalues_ranges, summit_ranges)) %>%
-      dplyr::filter(qvalues_ranges.seqnames==summit_ranges.seqnames) %>%
-      dplyr::select(peak_id, peak_summit_qvalue=qvalues_ranges.qvalue_score)
+      dplyr::filter(qvalue_chrom==peak_chrom) %>%
+      dplyr::select(peak_id, peak_summit_qvalue=qvalue_score)
     peaks_df = peaks_df %>%
       dplyr::select(-dplyr::matches("peak_summit_qvalue")) %>%
       dplyr::inner_join(summit2qvalue.map, by=c("peak_id"))
@@ -129,9 +152,9 @@ calculate_bait_enrichment = function(peaks_df, junctions_df) {
   peak_enrichment
 }
 
-fit_baseline = function(coverage_df, binstep, binwidth) {
+fit_baseline = function(coverage_df, binstep, llocal) {
   coverage_df.baseline = coverage_df %>%
-    dplyr::mutate(binstep=binstep, binwidth=binwidth) %>%
+    dplyr::mutate(binstep=binstep, llocal=llocal) %>%
     dplyr::mutate(break_exp_condition="Control") %>%
     dplyr::arrange(seqnames, start) %>%
     dplyr::group_by(break_exp_condition, seqnames) %>%
@@ -148,7 +171,7 @@ fit_baseline = function(coverage_df, binstep, binwidth) {
   coverage_df.baseline_output = foreach::foreach(z=coverage_dflist.baseline, .combine=rbind) %dopar% {
     x = matrix(as.numeric(z$coverage_mod), nrow=1)
     colnames(x) = z$start
-    bc.irls = baseline::baseline(x, method="medianWindow", hws=z$binwidth[1]/z$binstep[1], hwm=z$binwidth[1]/z$binstep[1]) # !!!!
+    bc.irls = baseline::baseline(x, method="medianWindow", hws=z$llocal[1]/z$binstep[1], hwm=z$llocal[1]/z$binstep[1]) # !!!!
     z.coverage_smooth = as.numeric(bc.irls@baseline)
     cbind(z[c("seqnames", "start", "end", "coverage", "coverage_mod")], coverage_smooth=z.coverage_smooth)
   }
@@ -186,6 +209,8 @@ calculate_coverage2 = function(ranges, mm9, extend=5e6, binsize=1000, binstep=10
     dplyr::select(-scale_factor) %>%
     dplyr::group_by(seqnames, start, end) %>%
     dplyr::summarise(coverage=sum(coverage_norm))
+
+  write.table(coverage_df %>% dplyr::select(seqnames, start, end, coverage), col.names=F, row.names=F, quote=F, file="data/macs2/coverage.bdg")
 
   class(coverage_df) = c("tbl_df", "tbl", "data.frame")
   coverage_df
@@ -284,13 +309,18 @@ call_peaks = function(sample_df, control_df=NULL, debug=F) {
   mm9_tiles = unlist(tileGenome(mm9, tilewidth=binsize))
   mm9_tiles$tile_id = 1:length(mm9_tiles)
 
+  extend=1e6
+  binsize=1e4
+  binstep=5e3
+  llocal=5e6
+
   #
   # Caclulate control baseline
   #
-  control_ranges = GenomicRanges::makeGRangesFromDataFrame(control_df, end.field="break_end", start.field="break_start", strand.field="break_strand", seqnames.field="break_chrom", keep.extra.columns=T)
+  control_ranges = GenomicRanges::makeGRangesFromDataFrame(control_df %>% dplyr::filter(break_chrom=="chr14") %>% dplyr::mutate(break_chrom=break_bait_chrom), end.field="break_end", start.field="break_start", strand.field="break_strand", seqnames.field="break_chrom", keep.extra.columns=T)
   control_tiles_df.coverage = calculate_coverage2(control_ranges, mm9, extend=extend, binsize=binsize, binstep=binstep)
   readr::write_tsv(control_tiles_df.coverage %>% dplyr::select(seqnames, start, end, coverage), control_bdg_path, col_names=F)
-  control_df.baseline = fit_baseline(control_tiles_df.coverage, binstep=binstep, binwidth=1e6) %>%
+  control_df.baseline = fit_baseline(control_tiles_df.coverage, binstep=binstep, llocal=llocal) %>%
     dplyr::rowwise() %>%
     dplyr::mutate(pvalue=pgamma(coverage, shape=coverage_smooth, rate=1, lower.tail=F), coverage_th01=qgamma(0.01, coverage_smooth, 1, lower.tail=F))
   readr::write_tsv(control_df.baseline %>% dplyr::select(seqnames, start, end, coverage_smooth), control_baseline_bdg_path, col_names=F)
@@ -300,11 +330,11 @@ call_peaks = function(sample_df, control_df=NULL, debug=F) {
   #
   # Caclulate sample baseline
   #
-  sample_ranges = GenomicRanges::makeGRangesFromDataFrame(sample_df, end.field="break_end", start.field="break_start", strand.field="break_strand", seqnames.field="break_chrom", keep.extra.columns=T)
-  sample_df.coverage = calculate_coverage(sample_ranges, mm9, extend)
+  sample_ranges = GenomicRanges::makeGRangesFromDataFrame(sample_df %>% dplyr::filter(break_chrom=="chr14") %>% dplyr::mutate(break_chrom=break_bait_chrom), end.field="break_end", start.field="break_start", strand.field="break_strand", seqnames.field="break_chrom", keep.extra.columns=T)
+  #sample_df.coverage = calculate_coverage(sample_ranges, mm9, extend)
   sample_tiles_df.coverage = calculate_coverage2(sample_ranges, mm9, extend=extend, binsize=binsize, binstep=binstep)
   readr::write_tsv(sample_tiles_df.coverage %>% dplyr::select(seqnames, start, end, coverage), sample_bdg_path, col_names=F)
-  sample_df.baseline = fit_baseline(sample_tiles_df.coverage, binstep=binstep, binwidth=1e6) %>%
+  sample_df.baseline = fit_baseline(sample_tiles_df.coverage, binstep=binstep, llocal=llocal) %>%
     dplyr::rowwise() %>%
     dplyr::mutate(pvalue=pgamma(coverage, shape=coverage_smooth, rate=1, lower.tail=F), coverage_th01=qgamma(0.01, coverage_smooth, 1, lower.tail=F))
   readr::write_tsv(sample_df.baseline %>% dplyr::select(seqnames, start, end, coverage_smooth), sample_baseline_bdg_path, col_names=F)
@@ -324,96 +354,33 @@ call_peaks = function(sample_df, control_df=NULL, debug=F) {
 
 
 
-  baselines = data.frame()
-  coverages = data.frame()
-  chr_all = paste0("chr", 1:19)
-  for(chr in chr_all) {
-    control_ranges = GenomicRanges::makeGRangesFromDataFrame(control_df %>% dplyr::mutate(scale_factor=1L) %>% dplyr::filter(break_bait_chrom==chr), end.field="break_end", start.field="break_start", strand.field="break_strand", seqnames.field="break_chrom", keep.extra.columns=T)
-    control_tiles_df.coverage = calculate_coverage2(control_ranges, mm9, extend=extend, binsize=binsize, binstep=binstep)
-
-    sample_ranges = GenomicRanges::makeGRangesFromDataFrame(sample_df %>% dplyr::mutate(scale_factor=1L) %>% dplyr::filter(break_bait_chrom==chr), end.field="break_end", start.field="break_start", strand.field="break_strand", seqnames.field="break_chrom", keep.extra.columns=T)
-    sample_tiles_df.coverage = calculate_coverage2(sample_ranges, mm9, extend=extend, binsize=binsize, binstep=binstep)
-
-    coverages = dplyr::bind_rows(
-      coverages,
-      sample_tiles_df.coverage %>% dplyr::mutate(break_exp_condition="Control", break_bait_chrom=chr),
-      control_tiles_df.coverage %>% dplyr::mutate(break_exp_condition="Sample", break_bait_chrom=chr)
-    )
-
-    # control_df.baseline = fit_baseline(control_tiles_df.coverage, binstep=binstep, binwidth=1e6) %>%
-    #   dplyr::rowwise() %>%
-    #   dplyr::mutate(pvalue=pgamma(coverage, shape=coverage_smooth, rate=1, lower.tail=F), coverage_th01=qgamma(0.01, coverage_smooth, 1, lower.tail=F))
-    # sample_df.baseline = fit_baseline(sample_tiles_df.coverage, binstep=binstep, binwidth=1e6) %>%
-    #   dplyr::rowwise() %>%
-    #   dplyr::mutate(pvalue=pgamma(coverage, shape=coverage_smooth, rate=1, lower.tail=F), coverage_th01=qgamma(0.01, coverage_smooth, 1, lower.tail=F))
-    # baselines = dplyr::bind_rows(
-    #   baselines,
-    #   sample_df.baseline %>% dplyr::mutate(break_exp_condition="Control", break_bait_chrom=chr),
-    #   control_df.baseline %>% dplyr::mutate(break_exp_condition="Sample", break_bait_chrom=chr)
-    # )
-  }
-
-    pdf("test2.pdf", width=40, height=80)
-    ggplot2::ggplot(coverages %>% dplyr::filter(seqnames=="chr1")) +
-      # ggridges::geom_ridgeline(aes(y=seqnames, x=start, height=coverage_smooth, color=break_exp_condition), fill="#00000000") +
-      ggplot2::geom_line(aes(x=start, y=coverage, color=break_exp_condition), alpha=0.5) +
-      ggplot2::coord_cartesian(ylim=c(0, 50)) +
-      ggplot2::scale_x_continuous(breaks=scale_breaks) +
-      ggplot2::facet_wrap(~break_bait_chrom, ncol=1) +
-      ggplot2::labs(x="")
-    dev.off()
-
-    chr1 = "chr13"
-    p = ggplot_karyoplot(
-      coverage_df=control_tiles_df.coverage %>% dplyr::filter(seqnames %in% chr1),
-      baselne_df=control_df.baseline %>% dplyr::filter(seqnames %in% chr1)
-    )
-    print(p)
-
-
-
-
 
   if(debug) {
-    ggplot.colors = c("pileup"="#333333", "smooth"="#FF0000", "smooth2"="#00AA00", mypeak="#CCCCCC", macspeaks="#FF0000")
-    chr_all = paste0("chr", 19)
-
-    pdf(file="reports/sample_baseline_1e6.pdf", width=15, height=4)
-    sample_tiles_df.coverage_sample = sample_tiles_df.coverage %>% dplyr::sample_frac(1)
-    for(chr in chr_all) {
+    pdf(file="reports/chr14_sample_baseline_extend1e6_smooth5e6_bin1e4_step5e3.pdf", width=15, height=4)
+    for(chr in paste0("chr", 1:19)) {
       print(chr)
-      p = ggplot() +
-        # geom_hex(aes(y=coverage, x=start), data=sample_tiles_df.coverage %>% dplyr::filter(dplyr::between(coverage, 2, 50) & seqnames %in% chr), bins=30) +
-        geom_point(aes(y=coverage, x=start), data=sample_tiles_df.coverage_sample %>% dplyr::filter(dplyr::between(coverage, 0, 50) & seqnames %in% chr), alpha=0.05) +
-        geom_rect(aes(xmin=peak_start, ymin=-2, xmax=peak_end, ymax=-1, color="macspeaks"), data=sample_peaks$peaks %>% dplyr::mutate(seqnames=peak_chrom) %>% dplyr::filter(seqnames %in% chr)) +
-        geom_rect(aes(xmin=start, ymin=-3, xmax=end, ymax=-2, color="mypeak"), data=sample_df.baseline %>% dplyr::filter(seqnames %in% chr & pvalue < 0.01)) +
-        geom_line(aes(y=coverage_smooth, x=start, color="smooth"), data=sample_df.baseline %>% dplyr::filter(seqnames %in% chr), alpha=0.8) +
-        geom_line(aes(y=coverage_th01, x=start, color="smooth"), data=sample_df.baseline %>% dplyr::filter(seqnames %in% chr), linetype="dashed", alpha=0.8) +
-        coord_cartesian(ylim=c(-5, 50)) +
-        scale_color_manual(values=ggplot.colors) +
-        scale_fill_manual(values=ggplot.colors) +
-        scale_x_continuous(breaks=scale_breaks) +
-        facet_wrap(~seqnames, scales="free_x", ncol=1)
+      coverage_df = dplyr::bind_rows(control_tiles_df.coverage %>% dplyr::mutate(break_exp_condition="Control"), sample_tiles_df.coverage %>% dplyr::mutate(break_exp_condition="Sample")) %>%
+         dplyr::filter(seqnames %in% chr)
+      baseline_df = dplyr::bind_rows(control_df.baseline %>% dplyr::mutate(break_exp_condition="Control"), sample_df.baseline %>% dplyr::mutate(break_exp_condition="Sample")) %>%
+         dplyr::filter(seqnames %in% chr)
+      p = ggplot_karyoplot(
+        coverage_df=coverage_df,
+        baseline_df=baseline_df,
+        peaks_df=sample_peaks$peaks %>% dplyr::mutate(seqnames=peak_chrom) %>% dplyr::filter(seqnames %in% chr)
+      )
       print(p)
     }
     dev.off()
 
-    pdf(file="reports/control_baseline_1e6.pdf", width=15, height=4)
-    control_tiles_df.coverage_sample = control_tiles_df.coverage %>% dplyr::sample_frac(1)
-    for(chr in chr_all) {
+    pdf(file="reports/chr4_control_baseline_extend1e6_smooth1e6_bin1e4_step5e3.pdf", width=15, height=4)
+    for(chr in paste0("chr", 1:19)) {
       print(chr)
-      p = ggplot() +
-        # geom_hex(aes(y=coverage, x=start), data=control_tiles_df.coverage %>% dplyr::filter(dplyr::between(coverage, 2, 50) & seqnames %in% chr), bins=30) +
-        geom_point(aes(y=coverage, x=start), data=control_tiles_df.coverage_sample %>% dplyr::filter(dplyr::between(coverage, 0, 50) & seqnames %in% chr), alpha=0.05, size=0.5) +
-        geom_rect(aes(xmin=peak_start, ymin=-2, xmax=peak_end, ymax=-1, color="macspeaks"), data=control_peaks$peaks %>% dplyr::mutate(seqnames=peak_chrom) %>% dplyr::filter(seqnames %in% chr)) +
-        geom_rect(aes(xmin=start, ymin=-3, xmax=end, ymax=-2, color="mypeak"), data=control_df.baseline %>% dplyr::filter(seqnames %in% chr & pvalue < 0.01)) +
-        geom_line(aes(y=coverage_smooth, x=start, color="smooth"), data=control_df.baseline %>% dplyr::filter(seqnames %in% chr), alpha=0.8) +
-        geom_line(aes(y=coverage_th01, x=start, color="smooth"), data=control_df.baseline %>% dplyr::filter(seqnames %in% chr), linetype="dashed", alpha=0.8) +
-        coord_cartesian(ylim=c(-5, 50)) +
-        scale_color_manual(values=ggplot.colors) +
-        scale_fill_manual(values=ggplot.colors) +
-        scale_x_continuous(breaks=scale_breaks) +
-        facet_wrap(~seqnames, scales="free_x", ncol=1)
+      p = ggplot_karyoplot(
+        coverage_df=control_tiles_df.coverage %>% dplyr::filter(seqnames %in% chr),
+        baseline_df=control_df.baseline %>% dplyr::filter(seqnames %in% chr),
+        peaks_df=control_peaks$peaks %>% dplyr::mutate(seqnames=peak_chrom) %>% dplyr::filter(seqnames %in% chr),
+        max_coverage=30
+      )
       print(p)
     }
     dev.off()
@@ -537,7 +504,7 @@ call_peaks = function(sample_df, control_df=NULL, debug=F) {
       print(chr)
       p = ggplot_karyoplot(
         coverage_df=control_tiles_df.coverage %>% dplyr::filter(seqnames %in% chr),
-        baselne_df=control_df.baseline %>% dplyr::filter(seqnames %in% chr),
+        baseline_df=control_df.baseline %>% dplyr::filter(seqnames %in% chr),
         peaks_df=control_peaks$peaks %>% dplyr::mutate(seqnames=peak_chrom) %>% dplyr::filter(seqnames %in% chr),
         bait_enrichemnt_df=peak_enrichment.significant %>% dplyr::mutate(seqnames=peak_chrom) %>% dplyr::filter(seqnames %in% chr)
       )
@@ -1076,3 +1043,48 @@ all_islands_cross = all_islands.f %>%
   #     z
   #   })(.)) %>%
   #   dplyr::ungroup()
+
+
+
+
+
+  #baselines = data.frame()
+  #coverages = data.frame()
+  #chr_all = paste0("chr", 1:1)
+  #for(chr in chr_all) {
+  #  control_ranges = GenomicRanges::makeGRangesFromDataFrame(control_df %>% dplyr::mutate(scale_factor=1L) %>% dplyr::filter(break_bait_chrom==chr), end.field="break_end", start.field="break_start", strand.field="break_strand", seqnames.field="break_chrom", keep.extra.columns=T)
+  #  control_tiles_df.coverage = calculate_coverage2(control_ranges, mm9, extend=extend, binsize=binsize, binstep=binstep)
+  #
+  #  sample_ranges = GenomicRanges::makeGRangesFromDataFrame(sample_df %>% dplyr::mutate(scale_factor=1L) %>% dplyr::filter(break_bait_chrom==chr), end.field="break_end", start.field="break_start", strand.field="break_strand", seqnames.field="break_chrom", keep.extra.columns=T)
+  #  sample_tiles_df.coverage = calculate_coverage2(sample_ranges, mm9, extend=extend, binsize=binsize, binstep=binstep)
+  #
+  #  coverages = dplyr::bind_rows(
+  #    coverages,
+  #    sample_tiles_df.coverage %>% dplyr::mutate(break_exp_condition="Control", break_bait_chrom=chr),
+  #    control_tiles_df.coverage %>% dplyr::mutate(break_exp_condition="Sample", break_bait_chrom=chr)
+  #  )
+  #
+  #  # control_df.baseline = fit_baseline(control_tiles_df.coverage, binstep=binstep, binwidth=1e6) %>%
+  #  #   dplyr::rowwise() %>%
+  #  #   dplyr::mutate(pvalue=pgamma(coverage, shape=coverage_smooth, rate=1, lower.tail=F), coverage_th01=qgamma(0.01, coverage_smooth, 1, lower.tail=F))
+  #  # sample_df.baseline = fit_baseline(sample_tiles_df.coverage, binstep=binstep, binwidth=1e6) %>%
+  #  #   dplyr::rowwise() %>%
+  #  #   dplyr::mutate(pvalue=pgamma(coverage, shape=coverage_smooth, rate=1, lower.tail=F), coverage_th01=qgamma(0.01, coverage_smooth, 1, lower.tail=F))
+  #  # baselines = dplyr::bind_rows(
+  #  #   baselines,
+  #  #   sample_df.baseline %>% dplyr::mutate(break_exp_condition="Control", break_bait_chrom=chr),
+  #  #   control_df.baseline %>% dplyr::mutate(break_exp_condition="Sample", break_bait_chrom=chr)
+  #  # )
+  #
+  #
+  #  #pdf("test2.pdf", width=40, height=80)
+  #  #ggplot2::ggplot(coverages %>% dplyr::filter(seqnames=="chr1")) +
+  #  #  # ggridges::geom_ridgeline(aes(y=seqnames, x=start, height=coverage_smooth, color=break_exp_condition), fill="#00000000") +
+  #  #  ggplot2::geom_line(aes(x=start, y=coverage, color=break_exp_condition), alpha=0.5) +
+  #  #  ggplot2::coord_cartesian(ylim=c(0, 50)) +
+  #  #  ggplot2::scale_x_continuous(breaks=scale_breaks) +
+  #  #  ggplot2::facet_wrap(~break_bait_chrom, ncol=1) +
+  #  #  ggplot2::labs(x="")
+  #  #dev.off()
+  #}
+
