@@ -11,7 +11,7 @@ library(qvalue)
 
 
 
-ggplot_karyoplot = function(coverage_df=NULL, baseline_df=NULL, peaks_df=NULL, bait_enrichemnt_df=NULL, max_coverage="auto", type="point") {
+ggplot_karyoplot = function(coverage_df=NULL, baseline_df=NULL, peaks_df=NULL, bait_enrichemnt_df=NULL, max_coverage="auto", type="point", qvalue_th=0.01) {
   ggplot.colors = c(mypeak="#CCCCCC", macspeaks="#FF0000", enriched="#0000FF", Control="#000000", Sample="#FF0000", Coverage="#000000", "Control baseline"="#0000FF", "Sample baseline"="#00FF00", "Coverage baseline"="#FF0000")
 
   if(max_coverage=="auto") {
@@ -45,12 +45,18 @@ ggplot_karyoplot = function(coverage_df=NULL, baseline_df=NULL, peaks_df=NULL, b
     }
     p = p + geom_rect(aes(xmin=start, xmax=end, fill=coverage, ymin=-3-break_exp_condition_number, ymax=-2-break_exp_condition_number), data=coverage_df)
   }
-  if(!is.null(peaks_df) & nrow(peaks_df)>0) { p = p + geom_rect(aes(xmin=peak_start, xmax=peak_end, color="macspeaks"), ymin=-2, ymax=-1, data=peaks_df) }
-  if(!is.null(baseline_df)) {
-    baseline_df.sign = baseline_df %>% dplyr::filter(pvalue < 0.01)
-    if(nrow(baseline_df.sign)>0) {
-      p = p + geom_rect(aes(xmin=start, xmax=end, color="mypeak"), ymin=-3, ymax=-2, data=baseline_df.sign)
+  if(!is.null(peaks_df) & nrow(peaks_df)>0) {
+    p = p + geom_rect(aes(xmin=peak_start, xmax=peak_end, color="macspeaks"), ymin=-2, ymax=-1, data=peaks_df)
+    if("peak_summit_abs" %in% colnames(peaks_df)) {
+      peaks_df$peak_summit_abs_display = ifelse(peaks_df$peak_summit_abs>=1e3, with(peaks_df, paste0(floor(peak_summit_abs/10^log10(peak_summit_abs)), "e", floor(log10(peak_summit_abs)))), as.character(round(peaks_df$peak_summit_abs)))
+      p = p + ggrepel::geom_text_repel(aes(x=peak_start, y=-1.5, label=peak_summit_abs_display), color="#333333", data=peaks_df)
     }
+  }
+  if(!is.null(baseline_df)) {
+    #baseline_df.sign = baseline_df %>% dplyr::filter(qvalue <= qvalue_th)
+    #if(nrow(baseline_df.sign)>0) {
+    #  p = p + geom_rect(aes(xmin=start, xmax=end, color="mypeak"), ymin=-3, ymax=-2, data=baseline_df.sign)
+    #}
 
     if(!("break_exp_condition" %in% colnames(baseline_df))) { baseline_df$break_exp_condition = "Coverage" }
     baseline_df$break_exp_condition = paste(baseline_df$break_exp_condition, "baseline")
@@ -62,37 +68,70 @@ ggplot_karyoplot = function(coverage_df=NULL, baseline_df=NULL, peaks_df=NULL, b
   p
 }
 
-macs_call_peaks = function(sample_bdg_path, baseline_bdg_path) {
-  qvalue_path = tempfile()
+macs_call_peaks = function(sample_df, baseline_df, matching_tiles=T) {
+  qvalue_path = "data/macs2/bdgcmp_qvalue.bdg"
+  peaks_path = "data/macs2/bdgcmp_peaks.bed"
 
   # Call peaks
-  system(stringr::str_glue("macs2 bdgcmp -t {input} -c {noise} -m qpois -o {output}", input=sample_bdg_path, noise=baseline_bdg_path, output=qvalue_path))
+  qvalues_df = NULL
+  if(matching_tiles) {
+    qvalues_df = baseline_df %>%
+      dplyr::select(seqnames, start, end, coverage.control=coverage) %>%
+      dplyr::inner_join(sample_df %>% dplyr::select(seqnames, start, end, coverage.sample=coverage), by=c("seqnames", "start", "end")) %>%
+      dplyr::rowwise() %>%
+      dplyr::mutate(pvalue=pgamma(coverage.sample, shape=coverage.control, rate=1, lower.tail=F)) %>%
+      dplyr::ungroup() %>%
+      dplyr::mutate(qvalue_score=qvalue::qvalue(pvalue)$qvalues) %>%
+      dplyr::mutate(qvalue_score=ifelse(qvalue_score==0, 100, -log10(qvalue_score))) %>%
+      dplyr::select(qvalue_chrom=seqnames, qvalue_start=start, qvalue_end=end, qvalue_score)
+    readr::write_tsv(qvalues_df, qvalue_path, col_names=F)
+  } else {
+    sample_bdg_path = "data/macs2/bdgcmp_sample.bdg"
+    baseline_bdg_path = "data/macs2/bdgcmp_baseline.bdg"
+    readr::write_tsv(sample_df %>% dplyr::select(seqnames, start, end, coverage), sample_bdg_path, col_names=F)
+    readr::write_tsv(baseline_df %>% dplyr::select(seqnames, start, end, coverage), baseline_bdg_path, col_names=F)
+    system(stringr::str_glue("macs2 bdgcmp -t {input} -c {noise} -m qpois -o {output}", input=sample_bdg_path, noise=baseline_bdg_path, output=qvalue_path))
+
+    qvalue_cols = cols(qvalue_chrom=col_character(), qvalue_start=col_double(), qvalue_end=col_double(), qvalue_score=col_double())
+    qvalues_df = readr::read_tsv(qvalue_path, col_names=names(qvalue_cols$cols), col_types=qvalue_cols) %>%
+      dplyr::mutate(qvalue_id=1:n())
+  }
+
   system(stringr::str_glue("macs2 bdgpeakcall -i {qvalue} -c {cutoff} --min-length {format(peak_min_length, scientific=F)} --max-gap {format(peak_max_gap, scientific=F)} -o {output}",
        qvalue=qvalue_path, output=peaks_path, cutoff=peaks_minqvalue, peak_max_gap=peaks_maxgap, peak_min_length=peaks_minlen))
 
   # Read results file
   peaks_cols = cols(
-    peak_chrom=col_character(), peak_start=col_double(), peak_end=col_double(), peak_length=col_character(), peak_abs_summit=col_double(),
+    peak_chrom=col_character(), peak_start=col_double(), peak_end=col_double(), peak_length=col_character(), peak_summit_abs=col_double(),
     peak_score=col_character(), peak_fc=col_double(), peak_pvalue_log10=col_double(), peak_qvalue_log10=col_double(), peak_sammit_offset=col_double()
   )
-  qvalue_cols = cols(qvalue_chrom=col_character(), qvalue_start=col_double(), qvalue_end=col_double(), qvalue_score=col_double())
-  qvalues_df = readr::read_tsv(qvalue_path, col_names=names(qvalue_cols$cols), col_types=qvalue_cols) %>%
-    dplyr::mutate(qvalue_id=1:n())
-
   peaks_df = readr::read_tsv(peaks_path, skip=1, col_names=names(peaks_cols$cols), col_types=peaks_cols) %>%
-    dplyr::mutate(peak_summit_pos=peak_start + peak_sammit_offset)
+    dplyr::mutate(peak_summit_pos=peak_start + peak_sammit_offset) %>% dplyr::select(-peak_summit_abs)
+
   if(nrow(peaks_df)>0) {
     peaks_df = peaks_df %>% dplyr::mutate(peak_id=1:n())
     qvalues_ranges = GenomicRanges::makeGRangesFromDataFrame(qvalues_df %>% dplyr::mutate(end=qvalue_end, start=qvalue_start, seqnames=qvalue_chrom), keep.extra.columns=T)
     summit_ranges = GenomicRanges::makeGRangesFromDataFrame(peaks_df %>% dplyr::mutate(end=peak_summit_pos, start=peak_summit_pos, seqnames=peak_chrom), keep.extra.columns=T)
+    sample_ranges = GenomicRanges::makeGRangesFromDataFrame(sample_df %>% dplyr::mutate(break_chrom=seqnames, break_start=start, break_end=end, break_coverage=coverage), keep.extra.columns=T)
     summit2qvalue.map = as.data.frame(IRanges::mergeByOverlaps(qvalues_ranges, summit_ranges)) %>%
       dplyr::filter(qvalue_chrom==peak_chrom) %>%
-      dplyr::select(peak_id, peak_summit_qvalue=qvalue_score)
+      dplyr::group_by(peak_id) %>%
+      dplyr::summarise(peak_summit_qvalue=max(qvalue_score))
+    summit2sample.map = as.data.frame(IRanges::mergeByOverlaps(sample_ranges, summit_ranges)) %>%
+      dplyr::filter(break_chrom==break_chrom) %>%
+      dplyr::group_by(peak_id) %>%
+      dplyr::summarise(peak_summit_abs=max(break_coverage))
+
     peaks_df = peaks_df %>%
+      dplyr::select(-dplyr::matches("peak_summit_abs|peak_summit_qvalue")) %>%
       dplyr::select(-dplyr::matches("peak_summit_qvalue")) %>%
-      dplyr::inner_join(summit2qvalue.map, by=c("peak_id"))
+      dplyr::inner_join(summit2qvalue.map, by=c("peak_id")) %>%
+      dplyr::select(-dplyr::matches("peak_summit_abs")) %>%
+      dplyr::inner_join(summit2sample.map, by=c("peak_id"))
   } else {
     peaks_df$peak_id = c()
+    peaks_df$peak_summit_qvalue = c()
+    peaks_df$peak_summit_abs = c()
   }
 
   list(peaks=peaks_df, qvalues=qvalues_df)
@@ -179,7 +218,7 @@ fit_baseline = function(coverage_df, binstep, llocal) {
     colnames(x) = z$start
     bc.irls = baseline::baseline(x, method="medianWindow", hws=z$llocal[1]/z$binstep[1], hwm=z$llocal[1]/z$binstep[1]) # !!!!
     z.coverage_smooth = as.numeric(bc.irls@baseline)
-    cbind(z[c("seqnames", "start", "end", "coverage", "coverage_mod")], coverage_smooth=z.coverage_smooth)
+    cbind(z[c("seqnames", "start", "end", "coverage", "coverage_mod", "is_filled")], coverage_smooth=z.coverage_smooth)
   }
   stopCluster(parallelCluster)
 
@@ -191,19 +230,6 @@ fit_baseline = function(coverage_df, binstep, llocal) {
       coverage_th01=qgamma(0.01, coverage_smooth, 1, lower.tail=F)) %>%
     dplyr::ungroup() %>%
     dplyr::mutate(qvalue=qvalue::qvalue(pvalue)$qvalues)
-
-  qvalue2coverage_df = coverage_df.baseline_output %>%
-    dplyr::mutate(coverage_smooth_lo=floor(coverage_smooth*1e1)/1e1, coverage_smooth_hi=ceiling(coverage_smooth*1e1)/1e1, qvalue_lo=floor(qvalue*1e4)/1e4, qvalue_hi=ceiling(qvalue*1e4)/1e4) %>%
-    dplyr::group_by(coverage_smooth_lo, coverage_smooth_hi, qvalue_lo, qvalue_hi) %>%
-    dplyr::summarise(coverage=max(coverage)) %>%
-    dplyr::mutate(coverage_smooth=coverage_smooth_lo/2+coverage_smooth_hi/2, qvalue=qvalue_lo/2+qvalue_hi/2)
-
-  qvalue2coverage_model = lm(coverage ~ coverage_smooth + qvalue, data=qvalue2coverage_df)
-  summary(qvalue2coverage_model)
-
-     lm(coverage ~ qvalue|coverage_smooth, data=qvalue2coverage_df)
-
-  IRanges::IRanges(start=coverage_df.baseline_output)
 
 
   return(coverage_df.baseline_output)
@@ -217,8 +243,57 @@ scale_breaks = function(x) {
 }
 
 
+read_breaks_experiments = function(path, chromosomes_map) {
+    #
+  # Read breaks
+  #
+  tlx_cols = cols(
+    Qname=col_character(), JuncID=col_character(), Rname=col_character(), Junction=col_double(),
+    Strand=col_character(), Rstart=col_double(), Rend=col_double(),
+    B_Rname=col_character(), B_Rstart=col_double(), B_Rend=col_double(), B_Strand=col_double(),
+    B_Qstart=col_double(), B_Qend=col_double(), Qstart=col_double(), Qend=col_double(), Qlen=col_double(),
+    B_Cigar=col_character(), Cigar=col_character(), Seq=col_character(), J_Seq=col_character(), Barcode=col_logical(),
+    unaligned=col_double(), baitonly=col_double(), uncut=col_double(), misprimed=col_double(), freqcut=col_double(),
+    largegap=col_double(), mapqual=col_double(), breaksite=col_double(), sequential=col_double(), repeatseq=col_double(), duplicate=col_double(), Note=col_character()
+  )
+
+  # Rename Chr14 to Alt289 (Was Alt289 and only PW255 was Alt287)
+  junctions_ann.excluded = "PW121|PW246|PW247|PW248|PW249|JK096|JK097|JK098|JK099|JK100|JK101"
+  junctions_ann.excluded = "NO FILTER"
+  junctions_ann = data.frame(break_file=list.files(path, full.names=T, recursive=T, pattern="*.tlx")) %>%
+     dplyr::filter(!grepl(junctions_ann.excluded, break_file)) %>%
+     dplyr::mutate(
+       break_bait_chrom1=tolower(basename(dirname(break_file))),
+       break_bait_chrom = chromosomes_map[tolower(basename(dirname(break_file)))],
+       break_condition = ifelse(grepl("DMSO", break_file), "Control", "Sample"),
+       break_tech_sample = gsub("_.*", "", basename(break_file)),
+       break_bio_sample=gsub(".*_((Alt|R)[0-9]+).*", "\\1", basename(break_file), ignore.case=T, perl=T)
+     ) %>%
+    dplyr::group_by(break_bait_chrom, break_bait_chrom1, break_condition) %>%
+    dplyr::mutate(break_replicate=1:n()) %>%
+    dplyr::ungroup()
+
+
+  junctions_df = data.frame()
+  for(i in 1:nrow(junctions_ann)) {
+    tlx_ann = junctions_ann[i,,drop=F]
+    tlx = cbind(tlx_ann, readr::read_tsv(tlx_ann$break_file, col_types=tlx_cols))
+    bed = tlx %>%
+      dplyr::mutate(break_chrom=chromosomes_map[Rname]) %>%
+      dplyr::mutate(break_score=".", break_strand=ifelse(Strand=="-1", "-", "+")) %>%
+      dplyr::mutate(break_exp_condition=tlx_ann$break_condition, break_file=tlx_ann$break_file, break_bait_chrom=tlx_ann$break_bait_chrom, break_replicate=tlx_ann$break_replicate) %>%
+      dplyr::select(break_bait_chrom, break_exp_condition, break_chrom=Rname, break_start=Junction, break_end=Junction, break_name=Qname, break_score, break_strand, break_file)
+    junctions_df = rbind(junctions_df, bed)
+  }
+
+  junctions_df %>% dplyr::mutate(break_id=1:n())
+}
+
 calculate_coverage2 = function(ranges, mm9, extend=5e6, binsize=1000, binstep=100) {
-  mm9_tiles = GenomicRanges::trim(GenomicRanges::resize(unlist(GenomicRanges::tileGenome(mm9, tilewidth=binstep)), binsize, fix="center"))
+  mm9_original_tiles = unlist(GenomicRanges::tileGenome(mm9, tilewidth=binstep))
+  mm9_original_tiles$original_start = GenomicRanges::start(mm9_original_tiles)
+  mm9_original_tiles$original_end = GenomicRanges::end(mm9_original_tiles)
+  mm9_tiles = GenomicRanges::trim(GenomicRanges::resize(mm9_original_tiles, binsize, fix="center"))
 
   seqinfo(ranges) = mm9
   ranges.extended = GenomicRanges::trim(GenomicRanges::resize(ranges, width=extend, fix="center"))
@@ -230,7 +305,7 @@ calculate_coverage2 = function(ranges, mm9, extend=5e6, binsize=1000, binstep=10
       z_tiles_df = as.data.frame(mm9_tiles) %>%
         dplyr::mutate(coverage=GenomicRanges::countOverlaps(mm9_tiles, z_ranges)) %>%
         tidyr::crossing(z %>% dplyr::select(break_bait_chrom, scale_factor) %>% dplyr::slice(1)) %>%
-        dplyr::select(seqnames, start, end, coverage, scale_factor)
+        dplyr::select(seqnames, start=original_start, end=original_end, coverage, scale_factor)
       z_tiles_df
     })(.)) %>%
     dplyr::ungroup() %>%
@@ -239,7 +314,7 @@ calculate_coverage2 = function(ranges, mm9, extend=5e6, binsize=1000, binstep=10
     dplyr::group_by(seqnames, start, end) %>%
     dplyr::summarise(coverage=sum(coverage_norm))
 
-  write.table(coverage_df %>% dplyr::select(seqnames, start, end, coverage), col.names=F, row.names=F, quote=F, file="data/macs2/coverage.bdg")
+  #write.table(coverage_df %>% dplyr::select(seqnames, start, end, coverage), col.names=F, row.names=F, quote=F, file="data/macs2/coverage.bdg")
 
   class(coverage_df) = c("tbl_df", "tbl", "data.frame")
   coverage_df
@@ -291,10 +366,14 @@ calculate_coverage = function(ranges, mm9, extend) {
 }
 
 call_peaks = function(sample_df, control_df=NULL, debug=F) {
-  binsize = 1e3
-  binstep = 5e2
-  extend = 1e5
-  llocal = 6e6
+  #binsize=1e4
+  binsize = 1e6
+  #binstep=5e3
+  binstep = 1e4
+  #extend=1e6
+  extend = 5e5
+  #llocal=5e6
+  llocal = 5e6
   peaks_minqvalue=-log10(0.01)
   peaks_maxgap=1e5
   peaks_minlen=200
@@ -305,14 +384,12 @@ call_peaks = function(sample_df, control_df=NULL, debug=F) {
   sample_bed_path = "data/breakensembl/Sample.bed"
   control_bed_path = "data/breakensembl/Control.bed"
 
-  sample_bdg_path = "data/macs2/Sample.bdg"
-  control_bdg_path = "data/macs2/Control.bdg"
-
-  sample_baseline_bdg_path = "data/macs2/Sample_baseline.bdg"
-  control_baseline_bdg_path = "data/macs2/Control_baseline.bdg"
-
-  qvalue_path = "data/macs2/qvalue.bdg"
-  peaks_path = "data/macs2/peaks.bed"
+  #sample_bdg_path = "data/macs2/Sample.bdg"
+  #control_bdg_path = "data/macs2/Control.bdg"
+  #
+  #sample_baseline_bdg_path = "data/macs2/Sample_baseline.bdg"
+  #control_baseline_bdg_path = "data/macs2/Control_baseline.bdg"
+  #control_baseline_adj_bdg_path = "data/macs2/Control_baseline_adj.bdg"
 
 
   sample_df = sample_df %>% dplyr::mutate(break_name=stringr::str_glue("{bait}_{name}", bait=break_bait_chrom, name=break_name))
@@ -341,22 +418,13 @@ call_peaks = function(sample_df, control_df=NULL, debug=F) {
   mm9_tiles = unlist(tileGenome(mm9, tilewidth=binsize))
   mm9_tiles$tile_id = 1:length(mm9_tiles)
 
-  extend=1e6
-  binsize=1e4
-  binstep=5e3
-  llocal=5e6
-
 
   #
   # Caclulate control baseline
   #
   control_ranges = GenomicRanges::makeGRangesFromDataFrame(control_df %>% dplyr::filter(break_chrom==break_bait_chrom), end.field="break_end", start.field="break_start", strand.field="break_strand", seqnames.field="break_chrom", keep.extra.columns=T)
   control_tiles_df.coverage = calculate_coverage2(control_ranges, mm9, extend=extend, binsize=binsize, binstep=binstep)
-  readr::write_tsv(control_tiles_df.coverage %>% dplyr::select(seqnames, start, end, coverage), control_bdg_path, col_names=F)
   control_df.baseline = fit_baseline(control_tiles_df.coverage, binstep=binstep, llocal=llocal)
-  readr::write_tsv(control_df.baseline %>% dplyr::select(seqnames, start, end, coverage_smooth), control_baseline_bdg_path, col_names=F)
-  control_peaks = macs_call_peaks(control_bdg_path, control_baseline_bdg_path)
-
 
 
   #
@@ -365,11 +433,28 @@ call_peaks = function(sample_df, control_df=NULL, debug=F) {
   sample_ranges = GenomicRanges::makeGRangesFromDataFrame(sample_df %>% dplyr::filter(break_chrom==break_bait_chrom), end.field="break_end", start.field="break_start", strand.field="break_strand", seqnames.field="break_chrom", keep.extra.columns=T)
   #sample_df.coverage = calculate_coverage(sample_ranges, mm9, extend)
   sample_tiles_df.coverage = calculate_coverage2(sample_ranges, mm9, extend=extend, binsize=binsize, binstep=binstep)
-  readr::write_tsv(sample_tiles_df.coverage %>% dplyr::select(seqnames, start, end, coverage), sample_bdg_path, col_names=F)
   sample_df.baseline = fit_baseline(sample_tiles_df.coverage, binstep=binstep, llocal=llocal)
-  readr::write_tsv(sample_df.baseline %>% dplyr::select(seqnames, start, end, coverage_smooth), sample_baseline_bdg_path, col_names=F)
-  sample_peaks = macs_call_peaks(sample_bdg_path, sample_baseline_bdg_path)
 
+  #save(sample_df.baseline, control_df.baseline, control_tiles_df.coverage, control_tiles_df.coverage, file="data3.rda")
+
+  #
+  # Adjust control baseline to sample library
+  #
+  control_df.baseline_adjusted = control_df.baseline %>%
+    dplyr::select(seqnames, start, end, coverage_smooth.control=coverage_smooth, is_filled.control=is_filled) %>%
+    dplyr::inner_join(sample_df.baseline %>% dplyr::select(seqnames, start, end, coverage, coverage_smooth.sample=coverage_smooth, is_filled.sample=is_filled), by=c("seqnames", "start", "end")) %>%
+    dplyr::group_by(seqnames) %>%
+    dplyr::mutate(
+      qc=!is_filled.control & coverage_smooth.control<quantile(coverage_smooth.control[!is_filled.control], 0.5),
+      qs=!is_filled.sample & coverage_smooth.sample<quantile(coverage_smooth.sample[!is_filled.sample], 0.5),
+      f=mean((coverage_smooth.sample/coverage_smooth.control)[qc&qs]),
+      coverage_smooth=f*coverage_smooth.control
+    ) %>%
+    dplyr::select(seqnames, start, end, coverage, coverage_smooth)
+
+  sample_peaks.adjusted = macs_call_peaks(
+    sample_df=sample_tiles_df.coverage %>% dplyr::select(seqnames, start, end, coverage),
+    baseline_df=control_df.baseline_adjusted %>% dplyr::select(seqnames, start, end, coverage=coverage_smooth))
 
   #control_df.coverage = calculate_coverage(sample_ranges, mm9, extend)
   #readr::write_tsv(control_df.coverage %>% dplyr::select(seqnames, start, end, coverage), control_bdg_path, col_names=F)
@@ -382,23 +467,24 @@ call_peaks = function(sample_df, control_df=NULL, debug=F) {
   #  dplyr::summarise(coverage=tidyr::replace_na(max(coverage), 0))
   #readr::write_tsv(control_tiles_df.coverage %>% dplyr::select(seqnames, start, end, coverage), "data/macs2/Control_tile.bdg", col_names=F)
 
-  peak_enrichment = calculate_bait_enrichment(control_peaks$peaks, control_df)
-  peak_enrichment.significant = peak_enrichment %>%
-    dplyr::filter(pvalue<0.01 & odds>1) %>%
-    dplyr::mutate(odds=ifelse(is.finite(odds), odds, max(odds)))
+  #peak_enrichment = calculate_bait_enrichment(control_peaks$., control_df)
+  #peak_enrichment.significant = peak_enrichment %>%
+  #  dplyr::filter(pvalue<0.01 & odds>1) %>%
+  #  dplyr::mutate(odds=ifelse(is.finite(odds), odds, max(odds)))
 
   if(debug) {
-    pdf(file="reports/data_baseline_extend1e6_smooth5e6_bin1e4_step5e3_line2.pdf", width=15, height=4)
+    pdf(file="reports/data_baseline_extend5e5_smooth5e6_bin1e6_step1e4.pdf", width=15, height=4)
     for(chr in paste0("chr", 1:19)) {
       print(chr)
       coverage_df = dplyr::bind_rows(control_tiles_df.coverage %>% dplyr::mutate(break_exp_condition="Control"), sample_tiles_df.coverage %>% dplyr::mutate(break_exp_condition="Sample")) %>%
          dplyr::filter(seqnames %in% chr)
-      baseline_df = dplyr::bind_rows(control_df.baseline %>% dplyr::mutate(break_exp_condition="Control"), sample_df.baseline %>% dplyr::mutate(break_exp_condition="Sample")) %>%
+      baseline_df = dplyr::bind_rows(control_df.baseline_adjusted %>% dplyr::mutate(break_exp_condition="Control"), sample_df.baseline %>% dplyr::mutate(break_exp_condition="Sample")) %>%
          dplyr::filter(seqnames %in% chr)
       p = ggplot_karyoplot(
         coverage_df=coverage_df,
         baseline_df=baseline_df,
-        peaks_df=sample_peaks$peaks %>% dplyr::mutate(seqnames=peak_chrom) %>% dplyr::filter(seqnames %in% chr),
+        #peaks_df=sample_peaks$peaks %>% dplyr::mutate(seqnames=peak_chrom) %>% dplyr::filter(seqnames %in% chr),
+        peaks_df=sample_peaks.adjusted$peaks %>% dplyr::mutate(seqnames=peak_chrom) %>% dplyr::filter(seqnames %in% chr),
         type="line"
       )
       #p = p + geom_vline(xintercept=c(64e6, 107e6, 117e6))
@@ -406,7 +492,7 @@ call_peaks = function(sample_df, control_df=NULL, debug=F) {
       print(p)
     }
     dev.off()
-
+  }
 
   if(F) {
     pdf(file="reports/raw_control_vs_sample.pdf", width=20, height=8)
@@ -674,52 +760,6 @@ call_peaks = function(sample_df, control_df=NULL, debug=F) {
     readr::write_tsv("data/macs2/enriched_peaks.bed", col_names=F)
 
   list(peaks=peaks, peaks_bait_stats=z_clustered_peaks)
-}
-
-read_breaks_experiments = function(path, chromosomes_map) {
-    #
-  # Read breaks
-  #
-  tlx_cols = cols(
-    Qname=col_character(), JuncID=col_character(), Rname=col_character(), Junction=col_double(),
-    Strand=col_character(), Rstart=col_double(), Rend=col_double(),
-    B_Rname=col_character(), B_Rstart=col_double(), B_Rend=col_double(), B_Strand=col_double(),
-    B_Qstart=col_double(), B_Qend=col_double(), Qstart=col_double(), Qend=col_double(), Qlen=col_double(),
-    B_Cigar=col_character(), Cigar=col_character(), Seq=col_character(), J_Seq=col_character(), Barcode=col_logical(),
-    unaligned=col_double(), baitonly=col_double(), uncut=col_double(), misprimed=col_double(), freqcut=col_double(),
-    largegap=col_double(), mapqual=col_double(), breaksite=col_double(), sequential=col_double(), repeatseq=col_double(), duplicate=col_double(), Note=col_character()
-  )
-
-  # Rename Chr14 to Alt289 (Was Alt289 and only PW255 was Alt287)
-  junctions_ann.excluded = "PW121|PW246|PW247|PW248|PW249|JK096|JK097|JK098|JK099|JK100|JK101"
-  junctions_ann.excluded = "NO FILTER"
-  junctions_ann = data.frame(break_file=list.files(path, full.names=T, recursive=T, pattern="*.tlx")) %>%
-     dplyr::filter(!grepl(junctions_ann.excluded, break_file)) %>%
-     dplyr::mutate(
-       break_bait_chrom1=tolower(basename(dirname(break_file))),
-       break_bait_chrom = chromosomes_map[tolower(basename(dirname(break_file)))],
-       break_condition = ifelse(grepl("DMSO", break_file), "Control", "Sample"),
-       break_tech_sample = gsub("_.*", "", basename(break_file)),
-       break_bio_sample=gsub(".*_((Alt|R)[0-9]+).*", "\\1", basename(break_file), ignore.case=T, perl=T)
-     ) %>%
-    dplyr::group_by(break_bait_chrom, break_bait_chrom1, break_condition) %>%
-    dplyr::mutate(break_replicate=1:n()) %>%
-    dplyr::ungroup()
-
-
-  junctions_df = data.frame()
-  for(i in 1:nrow(junctions_ann)) {
-    tlx_ann = junctions_ann[i,,drop=F]
-    tlx = cbind(tlx_ann, readr::read_tsv(tlx_ann$break_file, col_types=tlx_cols))
-    bed = tlx %>%
-      dplyr::mutate(break_chrom=chromosomes_map[Rname]) %>%
-      dplyr::mutate(break_score=".", break_strand=ifelse(Strand=="-1", "-", "+")) %>%
-      dplyr::mutate(break_exp_condition=tlx_ann$break_condition, break_file=tlx_ann$break_file, break_bait_chrom=tlx_ann$break_bait_chrom, break_replicate=tlx_ann$break_replicate) %>%
-      dplyr::select(break_bait_chrom, break_exp_condition, break_chrom=Rname, break_start=Junction, break_end=Junction, break_name=Qname, break_score, break_strand, break_file)
-    junctions_df = rbind(junctions_df, bed)
-  }
-
-  junctions_df %>% dplyr::mutate(break_id=1:n())
 }
 
 main = function() {
