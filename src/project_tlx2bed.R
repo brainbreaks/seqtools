@@ -367,15 +367,15 @@ calculate_coverage = function(ranges, mm9, extend) {
 
 call_peaks = function(sample_df, control_df=NULL, debug=F) {
   #binsize=1e4
-  binsize = 1e6
+  binsize = 1e5
   #binstep=5e3
   binstep = 1e4
   #extend=1e6
-  extend = 5e5
+  extend = 1e5
   #llocal=5e6
-  llocal = 5e6
+  llocal = 2e6
   peaks_minqvalue=-log10(0.01)
-  peaks_maxgap=1e5
+  peaks_maxgap=5e5
   peaks_minlen=200
   debug=F
 
@@ -473,7 +473,7 @@ call_peaks = function(sample_df, control_df=NULL, debug=F) {
   #  dplyr::mutate(odds=ifelse(is.finite(odds), odds, max(odds)))
 
   if(debug) {
-    pdf(file="reports/data_baseline_extend5e5_smooth5e6_bin1e6_step1e4.pdf", width=15, height=4)
+    pdf(file="reports/data_baseline_extend1e5_smooth2e6_bin1e5_step1e4.pdf", width=15, height=4)
     for(chr in paste0("chr", 1:19)) {
       print(chr)
       coverage_df = dplyr::bind_rows(control_tiles_df.coverage %>% dplyr::mutate(break_exp_condition="Control"), sample_tiles_df.coverage %>% dplyr::mutate(break_exp_condition="Sample")) %>%
