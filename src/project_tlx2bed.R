@@ -12,7 +12,7 @@ library(qvalue)
 
 
 ggplot_karyoplot = function(coverage_df=NULL, baseline_df=NULL, peaks_df=NULL, bait_enrichemnt_df=NULL, max_coverage="auto", type="point", qvalue_th=0.01) {
-  ggplot.colors = c(enriched="#0000FF", Control="#000000", Sample="#FF0000", "Sample filtered"="#FF0000", Max="#0000FF", Coverage="#000000")
+  ggplot.colors = c(enriched="#0000FF", Control="#000000", Sample="#FF0000", "Sample filtered"="#FF0000", Max="#0000FF", Coverage="#000000", RDC="#FFFF00")
 
   if(max_coverage=="auto") {
     if(!is.null(baseline_df)) { max_coverage = median(baseline_df$coverage_smooth)*12 } else {
@@ -22,11 +22,15 @@ ggplot_karyoplot = function(coverage_df=NULL, baseline_df=NULL, peaks_df=NULL, b
     }
   }
 
+  count_annotations = 1
+  if(!is.null(peaks_df) & nrow(peaks_df)>0) {
+    count_annotations = length(unique(peaks_df$break_exp_condition)) + 3
+  }
 
   p = ggplot() +
     # geom_hex(aes(y=coverage, x=start), data=coverage_df %>% dplyr::filter(dplyr::between(coverage, 2, max_coverage) & seqnames %in% chr), bins=30) +
     #geom_rect(aes(xmin=peak_start, ymin=-5-break_bait_chrom_number, xmax=peak_end, ymax=-4-break_bait_chrom_number, fill="enriched"), data=peak_enrichment.significant %>% dplyr::mutate(seqnames=peak_chrom) %>% dplyr::filter(seqnames %in% chr)) +
-    coord_cartesian(ylim=c(ifelse(is.null(bait_enrichemnt_df), -6*max_coverage*0.1, -25), max_coverage)) +
+    coord_cartesian(ylim=c(ifelse(is.null(bait_enrichemnt_df), -count_annotations*max_coverage*0.1, -25), max_coverage)) +
     scale_color_manual(values=ggplot.colors) +
     scale_fill_manual(values=ggplot.colors) +
     scale_x_continuous(breaks=scale_breaks) +
@@ -38,21 +42,26 @@ ggplot_karyoplot = function(coverage_df=NULL, baseline_df=NULL, peaks_df=NULL, b
     if(!("break_exp_condition" %in% colnames(coverage_df))) {
       coverage_df$break_exp_condition = "Coverage"
     }
-    coverage_df$break_exp_condition_number = as.numeric(as.factor(coverage_df$break_exp_condition))
+    coverage_df$peaks_offset = 1
+    if(!is.null(peaks_df) & nrow(peaks_df)>0) {
+      coverage_df$peaks_offset = length(unique(coverage_df$break_exp_condition)) + 2
+    }
+    coverage_df$break_exp_condition_number = as.numeric(as.factor(as.character(coverage_df$break_exp_condition)))
     if(type=="line") {
       p = p + geom_line(aes(y=coverage_limited, x=start, color=break_exp_condition), data=coverage_df, alpha=0.5, size=0.5)
     } else {
       p = p + geom_point(aes(y=coverage_limited, x=start, color=break_exp_condition), data=coverage_df, alpha=0.01, size=1)
     }
-    p = p + geom_rect(aes(xmin=start, xmax=end, fill=break_exp_condition, alpha=coverage, ymin=-(5+break_exp_condition_number)*max_coverage*0.1, ymax=-(4+break_exp_condition_number)*max_coverage*0.1), data=coverage_df)
+    p = p + geom_rect(aes(xmin=start, xmax=end, fill=break_exp_condition, alpha=coverage, ymin=-(peaks_offset+1+break_exp_condition_number)*max_coverage*0.1, ymax=-(peaks_offset+break_exp_condition_number)*max_coverage*0.1), data=coverage_df)
   }
   if(!is.null(peaks_df) & nrow(peaks_df)>0) {
-    peaks_df$break_exp_condition_number = as.numeric(as.factor(peaks_df$break_exp_condition))
-    p = p + geom_rect(aes(xmin=peak_start, xmax=peak_end, fill=break_exp_condition, ymin=-(2+break_exp_condition_number)*max_coverage*0.1, ymax=-(1+break_exp_condition_number)*max_coverage*0.1), data=peaks_df)
+
+    peaks_df$break_exp_condition_number = as.numeric(as.factor(as.character(peaks_df$break_exp_condition)))
+    p = p + geom_rect(aes(xmin=peak_start, xmax=peak_end, fill=break_exp_condition, ymin=-(0+break_exp_condition_number)*max_coverage*0.1, ymax=-(1+break_exp_condition_number)*max_coverage*0.1), data=peaks_df)
     if("peak_summit_abs" %in% colnames(peaks_df)) {
       # peaks_df$peak_summit_abs_display = ifelse(peaks_df$peak_summit_abs>=1e3, with(peaks_df, paste0(floor(peak_summit_abs/10^log10(peak_summit_abs)), "e", floor(log10(peak_summit_abs)))), as.character(round(peaks_df$peak_summit_abs)))
       peaks_df$peak_summit_abs_display = round(peaks_df$peak_summit_qvalue)
-      p = p + ggrepel::geom_text_repel(aes(x=peak_start, y=-(1.5+break_exp_condition_number)*max_coverage*0.1, label=peak_summit_abs_display), color="#333333", data=peaks_df)
+      p = p + ggrepel::geom_text_repel(aes(x=peak_start, y=-(0.5+break_exp_condition_number)*max_coverage*0.1, label=peak_summit_abs_display), color="#333333", data=peaks_df)
     }
   }
   if(!is.null(baseline_df)) {
@@ -369,6 +378,34 @@ calculate_coverage = function(ranges, mm9, extend) {
   coverage_norm_df
 }
 
+venn_ranges = function(r1, r2, name1, name2) {
+  r1$r1_id = 1:length(r1)
+  r1_df = as.data.frame(r1)
+  r2$r2_id = 1:length(r2)
+  r2_df = as.data.frame(r2)
+  r1_r2.map = as.data.frame(IRanges::mergeByOverlaps(r1, r2)) %>% dplyr::select(r1_id, r2_id)
+
+  r1.names = paste("R1", r1_df %>% dplyr::anti_join(r1_r2.map, by="r1_id") %>% .$r1_id)
+  r2.names = paste("R2", r2_df %>% dplyr::anti_join(r1_r2.map, by="r2_id") %>% .$r2_id)
+  common.names = paste("R1+R2", r1_df %>% dplyr::inner_join(r1_r2.map, by="r1_id") %>% .$r1)
+  r1.names = unique(c(r1.names, common.names))
+  r2.names = unique(c(r2.names, common.names))
+
+  # Chart
+  p = VennDiagram::venn.diagram(
+    x = list(r1.names, r2.names),
+    category.names = c(name1 , name2),
+    lwd = 2,
+    lty = 'blank',
+    fill = RColorBrewer::brewer.pal(3, "Pastel2")[1:2],
+    cat.cex = 2,
+    cat.fontface = "bold",
+    filename = NULL
+  )
+
+  grid::grid.draw(p)
+}
+
 call_peaks = function(sample_df, control_df=NULL, debug=F) {
   #binsize=1e4
   binsize = 1e5
@@ -489,6 +526,8 @@ call_peaks = function(sample_df, control_df=NULL, debug=F) {
     dplyr::arrange(dplyr::desc(qvalue_score.control)) %>%
     dplyr::distinct(peak_id, .keep_all=T)
 
+
+
   #control_df.coverage = calculate_coverage(sample_ranges, mm9, extend)
   #readr::write_tsv(control_df.coverage %>% dplyr::select(seqnames, start, end, coverage), control_bdg_path, col_names=F)
   #control_ranges.coverage = GenomicRanges::makeGRangesFromDataFrame(control_df.coverage, keep.extra.columns=T)
@@ -506,14 +545,6 @@ call_peaks = function(sample_df, control_df=NULL, debug=F) {
   #  dplyr::mutate(odds=ifelse(is.finite(odds), odds, max(odds)))
 
   if(debug) {
-    pdf(file="reports/duo_baseline_extend1e5_smooth2e6_bin1e5_step1e4.pdf", width=15, height=15)
-    ggplot(sample_peaks$peaks %>% dplyr::filter(peak_chrom=="chr1")) +
-      geom_point(aes(x=peak_summit_qvalue, y=qvalue_score.control)) +
-      ggrepel::geom_text_repel(aes(x=peak_summit_qvalue, y=qvalue_score.control, label=peak_chrom)) +
-      geom_abline(intercept=0, slope=1) +
-      coord_fixed()
-    dev.off()
-
     pdf(file="reports/duo_baseline_extend1e5_smooth2e6_bin1e5_step1e4.pdf", width=15, height=8)
     for(chr in paste0("chr", 1:19)) {
       print(chr)
@@ -527,7 +558,8 @@ call_peaks = function(sample_df, control_df=NULL, debug=F) {
       peaks_df = dplyr::bind_rows(
         control_peaks$peaks %>% dplyr::mutate(break_exp_condition="Control"),
         sample_peaks$peaks %>% dplyr::mutate(break_exp_condition="Sample"),
-        sample_peaks$peaks %>% dplyr::filter(qvalue_score.control < peak_summit_qvalue) %>%  dplyr::mutate(break_exp_condition="Sample filtered")) %>%
+        sample_peaks$peaks %>% dplyr::filter(qvalue_score.control < peak_summit_qvalue) %>%  dplyr::mutate(break_exp_condition="Sample filtered"),
+        rdc %>% dplyr::mutate(break_exp_condition="RDC", peak_start=rdc_start, peak_end=rdc_end, peak_chrom=rdc_chrom)) %>%
          dplyr::mutate(seqnames=peak_chrom) %>%
          dplyr::filter(seqnames %in% chr)
       p = ggplot_karyoplot(
@@ -543,8 +575,49 @@ call_peaks = function(sample_df, control_df=NULL, debug=F) {
     dev.off()
   }
 
+  genome_mm9 = Biostrings::readDNAStringSet("data/mm9/mm9.fa.gz", "fasta")
+  peaks_filtered_df = sample_peaks$peaks %>% dplyr::filter(peak_chrom=="chr1", qvalue_score.control < peak_summit_qvalue) %>%  dplyr::mutate(break_exp_condition="Sample filtered")
+  peaks_sequences = Biostrings::getSeq(genome_mm9, GenomicRanges::makeGRangesFromDataFrame(peaks_filtered_df %>% dplyr::mutate(seqnames=peak_chrom, start=peak_start, end=peak_end), keep.extra.columns=T))
+  peaks_filtered_df$peak_sequence = as.character(peaks_sequences)
+
+  writeLines(paste0(">", peaks_filtered_df$peak_id, "\n", peaks_filtered_df$peak_sequence), con="peaks.fasta")
+  writeLines(paste0(">", offtargets_df$offtarget_id, "\n", offtargets_df$offtarget_sequence), con="targets.fasta")
+  system("bwa index -b 100000000 peaks.fasta")
+  system("bwa mem -t 30 -k 5 -C -a -T 10 -B 1 -O 100 -E 100 -L 100 -D 0 -c 70000 -y 60000 peaks.fasta targets.fasta > targets.sam")
+
+
+  targets_df$offtarget_sequence
+
+  offtargets_df %>% dplyr::filter(offtarget_mismatches==0) %>% dplyr::select(bait_chrom, offtarget_start, offtarget_end)
+  GenomicRanges::makeGRangesFromDataFrame(as.data.frame(z) %>% dplyr::mutate(seqnames=peak_chrom, start=offtarget_start, end=offtarget_end))
+
   sample_peaks$peaks %>%
-    dplyr::filter(qvalue_score.control < peak_summit_qvalue)
+    dplyr::inner_join(offtargets_df %>% dplyr::filter(offtarget_mismatches==0) %>% dplyr::select(bait_chrom, offtarget_start, offtarget_end), by=c("peak_chrom"="bait_chrom")) %>%
+    dplyr::rowwise() %>%
+    dplyr::do((function(z){
+      zz<<-z
+      asddsa()
+      z.range = GenomicRanges::makeGRangesFromDataFrame(as.data.frame(z) %>% dplyr::mutate(seqnames=peak_chrom, start=peak_start, end=peak_end))
+      z.offtarget_range = GenomicRanges::makeGRangesFromDataFrame(as.data.frame(z) %>% dplyr::mutate(seqnames=peak_chrom, start=offtarget_start, end=offtarget_end))
+      z.seq = as.character(Biostrings::getSeq(genome_mm9, z.range))
+      z.bait_seq = as.character(Biostrings::getSeq(genome_mm9, z.offtarget_range))
+
+      z.seq_sub = substr(z.seq, nchar(z.seq)/2-4e5, nchar(z.seq)/2+4e5)
+      writeLines(z.bait_seq, con="seq1.fasta")
+      writeLines(z.seq_sub, con="seq2.fasta")
+
+      alignment = pairwiseAlignment(pattern=c(z.seq_sub, z.bait_seq), subject="supersede", type="local")
+    })(.))
+    dplyr::mutate(sequence=as.character(Biostrings::getSeq(genome_mm9, GRanges(offtarget_chrom, IRanges(start=offtarget_and_pam_start, end=offtarget_and_pam_end), strand=offtarget_strand))))
+
+
+  jpeg("reports/rdc2peaks_venn.jpg", width=800, height=800)
+  peaks_filtered_df = sample_peaks$peaks %>% dplyr::filter(qvalue_score.control < peak_summit_qvalue) %>%  dplyr::mutate(break_exp_condition="Sample filtered")
+  rdc_ranges = GenomicRanges::makeGRangesFromDataFrame(rdc %>% dplyr::mutate(seqnames=rdc_chrom, start=rdc_start, end=rdc_end), keep.extra.columns=T)
+  peaks_filtered_ranges = GenomicRanges::makeGRangesFromDataFrame(peaks_filtered_df %>% dplyr::mutate(seqnames=peak_chrom, start=peak_start, end=peak_end), keep.extra.columns=T)
+  venn_ranges(rdc_ranges, peaks_filtered_ranges, name1="RDC", name2="Peak")
+  dev.off()
+
 
   if(F) {
     pdf(file="reports/raw_control_vs_sample.pdf", width=20, height=8)
@@ -562,6 +635,7 @@ call_peaks = function(sample_df, control_df=NULL, debug=F) {
     print(p)
     dev.off()
   }
+
 
   #
   # VENN diagram overlap between SAMPLE and CONTROL
@@ -622,6 +696,8 @@ main = function() {
     dplyr::mutate(
       offtarget_start=ifelse(offtarget_mismatches==0 & bait_chrom=="chr15", 61818880, offtarget_start),
       offtarget_end=ifelse(offtarget_mismatches==0 & bait_chrom=="chr15", 61818881, offtarget_end))
+  targets_df = offtargets_df %>%
+    dplyr::filter(offtarget_mismatches==0)
 
   bed_cols = cols(chrom=col_character(), start=col_double(), end=col_double(), name=col_character(), score=col_character(), strand=col_character())
 
