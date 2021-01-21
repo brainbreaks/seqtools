@@ -12,16 +12,13 @@ library(ggplot2)
 library(Biostrings)
 library(BSgenome)
 
-
-  genome_mm9 = Biostrings::readDNAStringSet("data/mm9/mm9.fa.gz", "fasta")
-
 analyze.primers_in_mm9 = function() {
   chromosomes_map_df = readr::read_tsv("data/mm9_chromosomes_synonyms.tsv")
   chromosomes_map = chromosomes_map_df$chrom
   names(chromosomes_map) = chromosomes_map_df$chrom_synonym
 
   genome_mm9 = Biostrings::readDNAStringSet("data/mm9/mm9.fa.gz", "fasta")
-  validated_offtargets = readr::read_tsv("data/offtargets_computational_wei.tsv") %>%
+  validated_offtargets = readr::read_tsv("data/offtargets_pnas.tsv") %>%
     dplyr::mutate(
       offtarget_and_pam_start=ifelse(offtarget_strand=="+", offtarget_start, offtarget_start-3),
       offtarget_and_pam_end=ifelse(offtarget_strand=="+", offtarget_end+3, offtarget_end)) %>%
@@ -70,7 +67,7 @@ analyze.primers_in_mm9 = function() {
     system("bowtie-build --threads 30 data/mm9/mm9.fa.gz data/mm9/bowtie1/mm9")
   }
   system("bowtie --threads 30 --tryhard --all -v 3 --seedlen 5 -f --sam --no-unal data/mm9/bowtie1/mm9 tmp/primers.fa > tmp/primers_bowtie3.sam")
-  system("samtools sort -@ 30 tmp/primers_bowti3.sam > tmp/primers_bowtie3.bam")
+  system("samtools sort -@ 30 tmp/primers_bowtie3.sam > tmp/primers_bowtie3.bam")
 
   # Analyze genome position and give final output
   primers_alignments_param = ScanBamParam(tag=c("AS", "NM"), what=c("qname", "rname", "strand", "flag", "pos", "qwidth",  "cigar", "mapq", "qual"))

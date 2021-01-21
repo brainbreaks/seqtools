@@ -576,9 +576,62 @@ call_peaks = function(sample_df, control_df=NULL, debug=F) {
   }
 
   genome_mm9 = Biostrings::readDNAStringSet("data/mm9/mm9.fa.gz", "fasta")
-  peaks_filtered_df = sample_peaks$peaks %>% dplyr::filter(peak_chrom=="chr1", qvalue_score.control < peak_summit_qvalue) %>%  dplyr::mutate(break_exp_condition="Sample filtered")
+
+  targets_df1 = readr::read_tsv("data/breaksites.tsv") %>%
+    dplyr::inner_join(targets_df %>% dplyr::select(bait_chrom, offtarget_strand), by=c("breaksite_chrom"="bait_chrom")) %>%
+    dplyr::select(bait_chrom=breaksite_chrom, breaksite_pos, offtarget_strand)
+  targets_df1$offtarget_primer_sequence = as.character(Biostrings::getSeq(genome_mm9, GenomicRanges::makeGRangesFromDataFrame(
+    targets_df1 %>% dplyr::mutate(seqnames=bait_chrom, start=breaksite_pos, end=breaksite_pos+20, strand=offtarget_strand)
+  )))
+
+  targets_df1 %>%
+    dplyr::inner_join(targets_df %>% dplyr::select(bait_chrom, offtarget_primer_sequence), by="bait_chrom")
+
+
+  #x = data.frame(
+  #  seqnames=c("chr1", "chr11", "chr15", "Chr6", "chr8", "chr9"),
+  #  start=c(41964577, 38361129, 61819136, 70900097, 61956495, 25942295),
+  #  end=c(41964599, 38361151, 61819158, 70900119, 61956517, 25942317),
+  #  strand=c("-","-","-", "-", "-", "-"))
+  #x$sequence = as.character(Biostrings::getSeq(genome_mm9, GenomicRanges::makeGRangesFromDataFrame(x)))
+
+
+  peaks_filtered_df = sample_peaks$peaks
+  # %>% dplyr::filter(qvalue_score.control < peak_summit_qvalue)
   peaks_sequences = Biostrings::getSeq(genome_mm9, GenomicRanges::makeGRangesFromDataFrame(peaks_filtered_df %>% dplyr::mutate(seqnames=peak_chrom, start=peak_start, end=peak_end), keep.extra.columns=T))
   peaks_filtered_df$peak_sequence = as.character(peaks_sequences)
+  peaks_filtered_df$peak_sequence_rev = as.character(Biostrings::reverseComplement(peaks_sequences))
+  peaks_filtered_df = peaks_filtered_df %>%
+    dplyr::select(-dplyr::matches("^offtarget_")) %>%
+    dplyr::inner_join(targets_df %>% dplyr::select(bait_chrom, offtarget_primer_sequence), by=c("peak_chrom"="bait_chrom"))
+  alignments = Biostrings::pairwiseAlignment(peaks_filtered_df$offtarget_primer_sequence, peaks_filtered_df$peak_sequence, type="global-local", gapOpening=2, gapExtension=1)
+  alignments_rev = Biostrings::pairwiseAlignment(peaks_filtered_df$offtarget_primer_sequence, peaks_filtered_df$peak_sequence_rev, type="global-local", gapOpening=2, gapExtension=1)
+  peaks_filtered_df$bait_sequence=as.character(Biostrings::pattern(alignments))
+  peaks_filtered_df$bait_alignment_sequence=as.character(Biostrings::subject(alignments))
+  peaks_filtered_df$bait_alignment_score=pmax(Biostrings::score(alignments), Biostrings::score(alignments_rev))
+  peaks_filtered_df$bait_alignment_identity=pmax(Biostrings::pid(alignments), Biostrings::pid(alignments_rev))
+
+  peaks_filtered_df %>%
+    dplyr::group_by(peak_chrom) %>%
+    dplyr::summarise(identity.90=sum(bait_alignment_identity>=90), identity.max=max(bait_alignment_identity))
+
+  #peaks_filtered_df %>%
+  #  dplyr::filter(bait_alignment_identity>80) %>%
+  #  dplyr::select(offtarget_primer_sequence, bait_sequence, bait_alignment_sequence, bait_alignment_identity, bait_alignment_score) %>%
+  #  View()
+
+
+  pdf("test.pdf", width=8, height=8)
+  hist(peaks_filtered_df$bait_alignment_identity)
+  plot(sort(peaks_filtered_df$bait_alignment_identity))
+
+  peaks_filtered_df %>%
+    dplyr::select(peak_chrom, bait_sequence, bait_alignment_sequence, bait_alignment_identity, bait_alignment_score)  %>%
+    ggplot() +
+    geom_point(aes(bait_alignment_identity, bait_alignment_score))
+    #ggrepel::geom_text_repel(aes(bait_alignment_identity, bait_alignment_score, label=peak_chrom))
+  dev.off()
+
 
   writeLines(paste0(">", peaks_filtered_df$peak_id, "\n", peaks_filtered_df$peak_sequence), con="peaks.fasta")
   writeLines(paste0(">", offtargets_df$offtarget_id, "\n", offtargets_df$offtarget_sequence), con="targets.fasta")
