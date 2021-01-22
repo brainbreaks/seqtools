@@ -79,7 +79,7 @@ analyze.primers_in_mm9 = function() {
       cbind(d, do.call(rbind, lapply(d$flag, SamSeq::samFlags))) })[[1]] %>%
       dplyr::mutate(primer_sequence_name=qname, primer_alignment_end=pos+qwidth-1) %>%
       dplyr::mutate(primer_alignment_primary=!NOT_PRIMARY_ALIGNMENT) %>%
-      dplyr::filter(!READ_UNMAPPED) %>%
+      dplyr::filter(!READ_UNMAPPED & rname!="chrM") %>%
       dplyr::select(primer_sequence_name, primer_alignment_chrom=rname, primer_alignment_strand=strand, primer_alignment_start=pos, primer_alignment_end, primer_alignment_flag=flag, primer_alignment_cigar=cigar, primer_alignment_len=qwidth, primer_alignment_mismatches, primer_alignment_primary)
     primers_alignments = rbind(primers_alignments, primers_alignments.d)
   }
@@ -110,15 +110,15 @@ analyze.primers_in_mm9 = function() {
     dplyr::mutate(offtarget_validated=tidyr::replace_na(offtarget_validated, F)) %>%
     # dplyr::select(-primer_sequence_name, -primer_alignment_id) %>%
     dplyr::mutate(primer_alignment_mismatches_rate=primer_alignment_mismatches/primer_len) %>%
-    dplyr::filter(primer_alignment_mismatches<=10 & primer_alignment_has_pam & !grepl("_|chrY", primer_alignment_chrom)) %>%
-    dplyr::filter(primer_name=="sgRNA" & primer_alignment_has_pam & !grepl("random|chrY", primer_alignment_chrom))
+    dplyr::filter(primer_alignment_mismatches<=10 & primer_alignment_has_pam & !grepl("_", primer_alignment_chrom)) %>%
+    dplyr::filter(primer_name=="sgRNA" & primer_alignment_has_pam)
 
   primers_targets %>%
     dplyr::mutate(offtarget_validated=ifelse(offtarget_validated, 1, 0)) %>%
     dplyr::select(bait_name, bait_chrom, offtarget_chrom=primer_alignment_chrom, offtarget_strand=primer_alignment_strand, offtarget_start=primer_alignment_start, offtarget_end=primer_alignment_end, offtarget_mismatches=primer_alignment_mismatches, offtarget_primer_sequence=primer_sequence, offtarget_sequence=primer_alignment_sequence) %>%
     readr::write_tsv(file="data/offtargets_predicted.tsv")
 
-  pdf("reports/primers_offtargets.pdf", width=10, height=6)
+  pdf("reports/primers_offtargets_new.pdf", width=10, height=6)
   primers_targets = readr::read_tsv("data/offtargets_predicted.tsv") %>%
     dplyr::mutate(primer_name="sgRNA") %>%
     dplyr::mutate(bait_chrom=chromosomes_map[bait_chrom], offtarget_chrom=chromosomes_map[offtarget_chrom])
