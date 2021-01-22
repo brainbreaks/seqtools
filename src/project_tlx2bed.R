@@ -559,10 +559,47 @@ call_peaks = function(sample_df, control_df=NULL, debug=F) {
       dplyr::inner_join(targets_df %>% dplyr::select(bait_chrom, offtarget_primer_sequence), by=c("peak_chrom"="bait_chrom"))
     alignments = Biostrings::pairwiseAlignment(peaks_filtered_df$offtarget_primer_sequence, peaks_filtered_df$peak_sequence, type="global-local", gapOpening=10, gapExtension=4)
     alignments_rev = Biostrings::pairwiseAlignment(peaks_filtered_df$offtarget_primer_sequence, peaks_filtered_df$peak_sequence_rev, type="global-local", gapOpening=10, gapExtension=4)
+    alignments = c(alignments, alignments_rev)
+    peaks_filtered_df = rbind(peaks_filtered_df, peaks_filtered_df)
+    peaks_filtered_df$bait_alignment_direction = rep(c("sense", "antisense"), each=nrow(peaks_filtered_df)/2)
+    peaks_filtered_df$bait_alignment_nchar=Biostrings::nchar(alignments)
     peaks_filtered_df$bait_sequence=as.character(Biostrings::pattern(alignments))
     peaks_filtered_df$bait_alignment_sequence=as.character(Biostrings::subject(alignments))
-    peaks_filtered_df$bait_alignment_score=pmax(Biostrings::score(alignments), Biostrings::score(alignments_rev))
-    peaks_filtered_df$bait_alignment_identity=pmax(Biostrings::pid(alignments), Biostrings::pid(alignments_rev))
+    peaks_filtered_df$bait_alignment_score=Biostrings::score(alignments)
+    peaks_filtered_df$bait_alignment_identity=Biostrings::pid(alignments)
+    peaks_filtered_df = peaks_filtered_df %>%
+      dplyr::arrange(dplyr::desc(bait_alignment_identity)) %>%
+      dplyr::distinct(peak_chrom, peak_id, offtarget_primer_sequence, .keep_all=T)
+
+    random_peaks_df = as.data.frame(mm9) %>%
+      tibble::rownames_to_column("seqnames") %>%
+      dplyr::group_by(seqnames) %>%
+      dplyr::do((function(z){
+        z.start = sample(z$seqlengths-1e6, 100)
+        data.frame(peak_chrom=z$seqnames, seqnames=z$seqnames, peak_id=1:length(z.start), start=z.start, end=z.start+1e5)
+      })(.))
+    peaks_sequences = Biostrings::getSeq(genome_mm9, GenomicRanges::makeGRangesFromDataFrame(GenomicRanges::makeGRangesFromDataFrame(random_peaks_df), keep.extra.columns=T))
+    random_peaks_df$peak_sequence = as.character(peaks_sequences)
+    random_peaks_df$peak_sequence_rev = as.character(Biostrings::reverseComplement(peaks_sequences))
+    random_peaks_df = random_peaks_df %>%
+      dplyr::select(-dplyr::matches("^offtarget_")) %>%
+      dplyr::inner_join(targets_df %>% dplyr::select(bait_chrom, offtarget_primer_sequence), by=c("peak_chrom"="bait_chrom"))
+    alignments = Biostrings::pairwiseAlignment(random_peaks_df$offtarget_primer_sequence, random_peaks_df$peak_sequence, type="global-local", gapOpening=10, gapExtension=4)
+    alignments_rev = Biostrings::pairwiseAlignment(random_peaks_df$offtarget_primer_sequence, random_peaks_df$peak_sequence_rev, type="global-local", gapOpening=10, gapExtension=4)
+    alignments = c(alignments, alignments_rev)
+    random_peaks_df = rbind(random_peaks_df, random_peaks_df)
+    random_peaks_df$bait_alignment_direction = rep(c("sense", "antisense"), each=nrow(random_peaks_df)/2)
+    random_peaks_df$bait_alignment_nchar=Biostrings::nchar(alignments)
+    random_peaks_df$bait_sequence=as.character(Biostrings::pattern(alignments))
+    random_peaks_df$bait_alignment_sequence=as.character(Biostrings::subject(alignments))
+    random_peaks_df$bait_alignment_score=pmax(Biostrings::score(alignments), Biostrings::score(alignments_rev))
+    random_peaks_df$bait_alignment_identity=pmax(Biostrings::pid(alignments), Biostrings::pid(alignments_rev))
+    random_peaks_df = random_peaks_df %>%
+      dplyr::arrange(dplyr::desc(bait_alignment_identity)) %>%
+      dplyr::distinct(peak_chrom, peak_id, offtarget_primer_sequence, .keep_all=T)
+
+    plot(density(peaks_filtered_df$bait_alignment_identity, na.rm=T), ylim=c(0,0.3))
+    lines(density(random_peaks_df$bait_alignment_identity, na.rm=T))
 
     pdf(file="reports/duo_baseline_extend1e5_smooth2e6_bin1e5_step1e4.pdf", width=15, height=8)
     for(chr in paste0("chr", 1:19)) {
