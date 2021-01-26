@@ -48,6 +48,25 @@
   #    is_very_near_bait=ifelse(is_very_near_bait!="", is_very_near_bait, NA_character_),
   #    is_very_near_offtarget=ifelse(is_very_near_offtarget!="", is_very_near_offtarget, NA_character_))
 
+generate_background = function(peaks_df, mm9, n=5) {
+  random_lengths = data.frame(seqnames=peaks_df$peak_chrom, peak_width=round((peaks_df$peak_end - peaks_df$peak_start)/1e4)*1e4)
+  random_peaks_df = as.data.frame(mm9) %>%
+    tibble::rownames_to_column("seqnames") %>%
+    dplyr::inner_join(random_lengths, by="seqnames") %>%
+    dplyr::group_by(seqnames) %>%
+    dplyr::do((function(z){
+      z.start = sample(z$seqlengths[1]-1e6, nrow(z)*n)
+      data.frame(seqnames=z$seqnames[1], seqlengths=z$seqlengths[1]-1e6, start=z.start, peak_width=rep(z$peak_width, each=n)) %>%
+        dplyr::mutate(start=ifelse(start+peak_width>=seqlengths, start-peak_width, start), end=start+peak_width)
+    })(.)) %>%
+    dplyr::ungroup() %>%
+    dplyr::mutate(peak_chrom=seqnames, peak_start=start, peak_end=end) %>%
+    dplyr::mutate(peak_id=1:n()) %>%
+    dplyr::select(-seqlengths)
+
+  random_peaks_df
+}
+
 calculate_bait_enrichment = function(peaks_df, junctions_df) {
   peaks_ranges = GenomicRanges::makeGRangesFromDataFrame(peaks_df %>% dplyr::mutate(seqnames=peak_chrom, start=peak_start, end=peak_end), keep.extra.columns=T)
   breaks_ranges = GenomicRanges::makeGRangesFromDataFrame(junctions_df %>% dplyr::mutate(seqnames=break_chrom, start=break_start, end=break_end), keep.extra.columns=T)

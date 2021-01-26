@@ -81,11 +81,11 @@ macs_call_peaks = function(signal_df, background_df, matching_tiles=T, minqvalue
     summit2qvalue.map = as.data.frame(IRanges::mergeByOverlaps(qvalues_ranges, summit_ranges)) %>%
       dplyr::filter(qvalue_chrom==peak_chrom) %>%
       dplyr::group_by(peak_id) %>%
-      dplyr::summarise(peak_summit_qvalue=max(qvalue_score))
+      dplyr::summarise(peak_summit_qvalue=max(qvalue_score), .groups="keep")
     summit2sample.map = as.data.frame(IRanges::mergeByOverlaps(sample_ranges, summit_ranges)) %>%
       dplyr::filter(break_chrom==break_chrom) %>%
       dplyr::group_by(peak_id) %>%
-      dplyr::summarise(peak_summit_abs=max(break_coverage))
+      dplyr::summarise(peak_summit_abs=max(break_coverage), .groups="keep")
 
     peaks_df = peaks_df %>%
       dplyr::select(-dplyr::matches("peak_summit_abs|peak_summit_qvalue")) %>%

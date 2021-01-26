@@ -9,6 +9,7 @@ library(foreach)
 library(doParallel)
 library(qvalue)
 library(Gviz)
+library(future)
 source("src/utilities.R")
 source("src/visualization.R")
 
@@ -38,26 +39,6 @@ peaks2offtargets_identity = function(peaks_df, offtargets_df, genome_mm9) {
   peaks_df
 }
 
-
-generate_background = function(peaks_df, mm9, n=5) {
-  random_lengths = data.frame(seqnames=peaks_df$peak_chrom, peak_width=round((peaks_df$peak_end - peaks_df$peak_start)/1e4)*1e4)
-  random_peaks_df = as.data.frame(mm9) %>%
-    tibble::rownames_to_column("seqnames") %>%
-    dplyr::inner_join(random_lengths, by="seqnames") %>%
-    dplyr::group_by(seqnames) %>%
-    dplyr::do((function(z){
-      z.start = sample(z$seqlengths[1]-1e6, nrow(z)*n)
-      data.frame(seqnames=z$seqnames[1], seqlengths=z$seqlengths[1]-1e6, start=z.start, peak_width=rep(z$peak_width, each=n)) %>%
-        dplyr::mutate(start=ifelse(start+peak_width>=seqlengths, start-peak_width, start), end=start+peak_width)
-    })(.)) %>%
-    dplyr::ungroup() %>%
-    dplyr::mutate(peak_chrom=seqnames, peak_start=start, peak_end=end) %>%
-    dplyr::mutate(peak_id=1:n()) %>%
-    dplyr::select(-seqlengths)
-
-  random_peaks_df
-}
-
 fit_baseline = function(coverage_df, binstep, llocal) {
   coverage_df.baseline = coverage_df %>%
     dplyr::mutate(binstep=binstep, llocal=llocal) %>%
@@ -75,10 +56,10 @@ fit_baseline = function(coverage_df, binstep, llocal) {
   doParallel::registerDoParallel(parallelCluster)
   coverage_dflist.baseline = coverage_df.baseline %>%
     dplyr::group_split()
-  coverage_df.baseline_output = foreach::foreach(z=coverage_dflist.baseline, .combine=rbind) %dopar% {
+  coverage_df.baseline_output = foreach::foreach(z=coverage_dflist.baseline, .combine=rbind) %do% {
     x = matrix(as.numeric(z$coverage_mod), nrow=1)
     colnames(x) = z$start
-    bc.irls = baseline::baseline(x, method="medianWindow", hws=z$llocal[1]/z$binstep[1], hwm=z$llocal[1]/z$binstep[1]) # !!!!
+    bc.irls = baseline::baseline(x, method="medianWindow", hws=z$llocal[1]/z$binstep[1], hwm=z$llocal[1]/z$binstep[1])
     z.coverage_smooth = as.numeric(bc.irls@baseline)
     cbind(z[c("seqnames", "start", "end", "coverage", "coverage_mod", "is_filled")], coverage_smooth=z.coverage_smooth)
   }
@@ -151,30 +132,22 @@ read_junctions = function(path) {
   junctions_df %>% dplyr::mutate(junction_id=1:n())
 }
 
-calculate_coverage2 = function(ranges, mm9, extend=5e6, binsize=1000, binstep=100) {
-  mm9_original_tiles = unlist(GenomicRanges::tileGenome(mm9, tilewidth=binstep))
-  mm9_original_tiles$original_start = GenomicRanges::start(mm9_original_tiles)
-  mm9_original_tiles$original_end = GenomicRanges::end(mm9_original_tiles)
-  mm9_tiles = GenomicRanges::trim(GenomicRanges::resize(mm9_original_tiles, binsize, fix="center"))
+calculate_coverage2 = function(ranges, genome_info, params) {
+  genome_original_tiles = unlist(GenomicRanges::tileGenome(genome_info, tilewidth=params$binstep))
+  genome_original_tiles$original_start = GenomicRanges::start(genome_original_tiles)
+  genome_original_tiles$original_end = GenomicRanges::end(genome_original_tiles)
+  genome_tiles = GenomicRanges::trim(GenomicRanges::resize(genome_original_tiles, params$binsize, fix="center"))
 
-  seqinfo(ranges) = mm9
-  ranges.extended = GenomicRanges::trim(GenomicRanges::resize(ranges, width=extend, fix="center"))
-  coverage_df = as.data.frame(ranges.extended) %>%
-    dplyr::group_by(break_bait_chrom) %>%
-    dplyr::do((function(z){
-      zz<<-z
-      z_ranges = GenomicRanges::makeGRangesFromDataFrame(z, keep.extra.columns=T)
-      z_tiles_df = as.data.frame(mm9_tiles) %>%
-        dplyr::mutate(coverage=GenomicRanges::countOverlaps(mm9_tiles, z_ranges)) %>%
-        tidyr::crossing(z %>% dplyr::select(break_bait_chrom, scale_factor) %>% dplyr::slice(1)) %>%
-        dplyr::select(seqnames, start=original_start, end=original_end, coverage, scale_factor)
-      z_tiles_df
-    })(.)) %>%
-    dplyr::ungroup() %>%
-    dplyr::mutate(coverage_norm=coverage*scale_factor) %>%
-    dplyr::select(-scale_factor) %>%
+  GenomeInfoDb::seqinfo(ranges) = genome_info
+  ranges.extended = GenomicRanges::trim(GenomicRanges::resize(ranges, width=params$extend, fix="center"))
+
+
+  hits = as(findOverlaps(genome_tiles, ranges.extended), "List")
+  coverage_df = as.data.frame(genome_tiles) %>%
+    dplyr::mutate(coverage = sum(extractList(ranges.extended$scale_factor, hits))) %>%
+    dplyr::mutate(start=original_start, end=original_end) %>%
     dplyr::group_by(seqnames, start, end) %>%
-    dplyr::summarise(coverage=sum(coverage_norm))
+    dplyr::summarise(coverage=sum(coverage))
 
   #write.table(coverage_df %>% dplyr::select(seqnames, start, end, coverage), col.names=F, row.names=F, quote=F, file="data/macs2/coverage.bdg")
 
@@ -186,55 +159,41 @@ call_peaks_params = function(binsize=1e5, binstep=1e4, extend=1e5, llocal=2e6, m
   list(binsize=binsize, binstep=binstep, extend=extend, llocal=llocal, minqvalue=-log10(minqvalue), maxgap=maxgap, minlen=minlen)
 }
 
-call_peaks = function(sample_df, control_df=NULL, params=call_peaks_params(), debug=F, debug_annotations=c("RDC"=rdc)) {
-  do_compare = !is.null(control_df)
+call_peaks = function(sample_ranges, control_ranges, genome_info, params=call_peaks_params(), debug=F) {
+  # Prepare tiles
+  genome_tiles = unlist(tileGenome(genome_info, tilewidth=params$binsize))
+  genome_tiles$tile_id = 1:length(genome_tiles)
 
   sample_bed_path = "data/breakensembl/Sample.bed"
   control_bed_path = "data/breakensembl/Control.bed"
 
-  sample_df = sample_df %>% dplyr::mutate(break_name=stringr::str_glue("{bait}_{name}", bait=break_bait_chrom, name=break_name))
   if(debug) {
-    readr::write_tsv(sample_df %>% dplyr::select(break_chrom, break_start, break_end, break_name, break_score, break_strand), sample_bed_path, col_names=F)
+    readr::write_tsv(as.data.frame(sample_ranges), sample_bed_path, col_names=F)
   }
 
-  if(!do_compare) {
-    control_df = sample_df
-    control_bed_path = sample_bed_path
+  if(is.null(control_ranges)) {
+    control_ranges = sample_ranges
   } else {
-    control_df = control_df %>% dplyr::mutate(break_name=stringr::str_glue("{bait}_{name}", bait=break_bait_chrom, name=break_name))
     if(debug) {
-      readr::write_tsv(control_df %>% dplyr::select(break_chrom, break_start, break_end, break_name, break_score, break_strand), control_bed_path, col_names=F)
+      readr::write_tsv(as.data.frame(control_ranges), control_bed_path, col_names=F)
     }
   }
-
-
-  # slocal background
-  options("UCSC.goldenPath.url"="https://hgdownload.cse.ucsc.edu/goldenPath")
-  mm9 = GenomeInfoDb::Seqinfo(genome="mm9")[paste0("chr", 1:19)]
-  #mm9 = as(tibble::as_tibble(mm9, rownames="s") %>% dplyr::mutate(seqlengths=seqlengths[s==single_break_chr]) %>% tibble::column_to_rownames("s"), "Seqinfo")
-  mm9_size = sum(mm9@seqlengths)
-  mm9_effective_size=0.74 * mm9_size
-  mm9_tiles = unlist(tileGenome(mm9, tilewidth=params$binsize))
-  mm9_tiles$tile_id = 1:length(mm9_tiles)
-  mm9_txdb.gtf = GenomicFeatures::makeTxDbFromGFF('data/mm9/mm9.refGene.gtf.gz', format="gtf")
-
-
-  #
-  # Caclulate control baseline
-  #
-  control_ranges = GenomicRanges::makeGRangesFromDataFrame(control_df %>% dplyr::filter(break_chrom==break_bait_chrom), end.field="break_end", start.field="break_start", strand.field="break_strand", seqnames.field="break_chrom", keep.extra.columns=T)
-  control_tiles_df.coverage = calculate_coverage2(control_ranges, mm9, extend=params$extend, binsize=params$binsize, binstep=params$binstep)
-  control_df.baseline = fit_baseline(control_tiles_df.coverage, binstep=params$binstep, llocal=params$llocal)
-
 
   #
   # Caclulate sample baseline
   #
-  sample_ranges = GenomicRanges::makeGRangesFromDataFrame(sample_df %>% dplyr::filter(break_chrom==break_bait_chrom), end.field="break_end", start.field="break_start", strand.field="break_strand", seqnames.field="break_chrom", keep.extra.columns=T)
-  #sample_df.coverage = calculate_coverage(sample_ranges, mm9, params$extend)
-  sample_tiles_df.coverage = calculate_coverage2(sample_ranges, mm9, extend=params$extend, binsize=params$binsize, binstep=params$binstep)
+  sample_tiles_df.coverage = calculate_coverage2(sample_ranges, genome_info, params=params)
   sample_df.baseline = fit_baseline(sample_tiles_df.coverage, binstep=params$binstep, llocal=params$llocal)
 
+  #
+  # Caclulate control baseline
+  #
+  if(is.null(control_df)) {
+    control_df.baseline = sample_df.baseline
+  } else {
+    control_tiles_df.coverage = calculate_coverage2(control_ranges, genome_info, params=params)
+    control_df.baseline = fit_baseline(control_tiles_df.coverage, binstep=params$binstep, llocal=params$llocal)
+  }
 
   #
   # Adjust control baseline to sample library
@@ -276,12 +235,12 @@ call_peaks = function(sample_df, control_df=NULL, params=call_peaks_params(), de
   sample_peaks = macs_call_peaks(
     signal_df=sample_tiles_df.coverage %>% dplyr::select(seqnames, start, end, coverage),
     background_df=mixed_df.baseline %>% dplyr::select(seqnames, start, end, coverage=coverage_smooth),
-    minqvalue=params$minqvalue, maxgap=params$maxgap, minlen=pparams$minlen)
+    minqvalue=params$minqvalue, maxgap=params$maxgap, minlen=params$minlen)
 
   control_peaks = macs_call_peaks(
     signal_df=control_tiles_df.coverage %>% dplyr::select(seqnames, start, end, coverage),
     background_df=control_df.baseline %>% dplyr::select(seqnames, start, end, coverage=coverage_smooth),
-    minqvalue=params$minqvalue, maxgap=params$maxgap, minlen=pparams$minlen)
+    minqvalue=params$minqvalue, maxgap=params$maxgap, minlen=params$minlen)
 
   sample_peaks_ranges = GenomicRanges::makeGRangesFromDataFrame(sample_peaks$peaks %>% dplyr::select(seqnames=peak_chrom, start=peak_start, end=peak_end, peak_id.sample=peak_id), keep.extra.columns=T)
   control_peaks_ranges = GenomicRanges::makeGRangesFromDataFrame(control_peaks$peaks %>% dplyr::select(seqnames=peak_chrom, start=peak_start, end=peak_end, peak_id.control=peak_id), keep.extra.columns=T)
@@ -293,11 +252,81 @@ call_peaks = function(sample_df, control_df=NULL, params=call_peaks_params(), de
     dplyr::arrange(dplyr::desc(qvalue_score.control)) %>%
     dplyr::distinct(peak_id, .keep_all=T)
 
+  list(sample=sample_peaks$peaks, control=control_peaks$peaks)
+}
+
+main = function() {
+  read_mm9_job = parallel::mcparallel(Biostrings::readDNAStringSet("data/mm9/mm9.fa.gz", "fasta"))
+
+  chromsizes_cols = readr::cols(seqnames=col_character(), seqlengths=col_double())
+  genome_info = with(readr::read_tsv("data/mm9/mm9.chrom.sizes", col_names=names(chromsizes_cols$cols), col_types=chromsizes_cols),
+             GenomeInfoDb::Seqinfo(seqnames, seqlengths, isCircular=rep(F, length(seqnames)), genome=rep("mm9", length(seqnames))))
+  genome_info = genome_info[paste0("chr", c(1:19, "X", "Y"))]
+
+
+
+  chromosomes_map_df = readr::read_tsv("data/mm9_chromosomes_synonyms.tsv")
+
+  # Read offtargets
+  offtargets_cols = readr::cols(bait_name=col_character(), bait_chrom=col_character(),
+    offtarget_chrom=col_character(), offtarget_strand=col_character(), offtarget_start=col_double(), offtarget_end=col_double(),
+    offtarget_mismatches=col_double(), offtarget_primer_sequence=col_character(), offtarget_sequence=col_character())
+  offtargets_df = readr::read_tsv("data/offtargets_predicted.tsv", col_types=offtargets_cols) %>%
+    dplyr::inner_join(chromosomes_map_df, by=c("bait_chrom"="chrom_synonym")) %>%
+    dplyr::mutate(bait_chrom=unique_chrom) %>%
+    dplyr::select(-unique_chrom) %>%
+    dplyr::inner_join(chromosomes_map_df, by=c("offtarget_chrom"="chrom_synonym")) %>%
+    dplyr::mutate(offtarget_chrom=unique_chrom) %>%
+    dplyr::select(-unique_chrom) %>%
+    dplyr::mutate(offtarget_id=1:n()) %>%
+    dplyr::filter(offtarget_mismatches<=4)
+  targets_df = offtargets_df %>%
+    dplyr::filter(offtarget_mismatches==0)
+
+  #
+  # Calculate normalization accross experiment
+  #
+  junctions_df = read_junctions("data/breaks_tlx") %>%
+    dplyr::inner_join(chromosomes_map_df, by=c("bait_chrom"="chrom_synonym")) %>%
+    dplyr::mutate(bait_chrom=unique_chrom) %>%
+    dplyr::select(-unique_chrom) %>%
+    dplyr::inner_join(chromosomes_map_df, by=c("junction_chrom"="chrom_synonym")) %>%
+    dplyr::mutate(junction_chrom=unique_chrom) %>%
+    dplyr::select(-unique_chrom) %>%
+    dplyr::mutate(junction_name=stringr::str_glue("{bait}_{name}", bait=bait_chrom, name=junction_name))
+  scale_factor_df = junctions_df %>%
+    dplyr::group_by(experimental_condition, bait_chrom) %>%
+    dplyr::summarise(libsize=n()) %>%
+    dplyr::mutate(libsize_median=median(libsize)) %>%
+    dplyr::mutate(scale_factor=libsize_median/libsize) %>%
+    dplyr::select(experimental_condition, bait_chrom, scale_factor)
+  junctions_df = junctions_df %>%
+    dplyr::select(-dplyr::matches("scale_factor")) %>%
+    dplyr::inner_join(scale_factor_df, by=c("experimental_condition", "bait_chrom"))
+
+  rdc_cols = readr::cols(rdc_cluster=col_character(), rdc_chrom=col_character(), rdc_start=col_double(), rdc_end=col_double(), rdc_group=col_double(), rdc_gene=col_character())
+  rdc_df = readr::read_tsv("data/rdc_pnas.tsv", col_types=rdc_cols) %>%
+    dplyr::inner_join(chromosomes_map_df, by=c("rdc_chrom"="chrom_synonym")) %>%
+    dplyr::mutate(rdc_chrom=unique_chrom) %>%
+    dplyr::select(-unique_chrom) %>%
+    dplyr::mutate(rdc_length=rdc_end-rdc_start) %>%
+    dplyr::mutate(rdc_id=1:n())
+
+  sample_df = junctions_df %>% dplyr::filter(experimental_condition=="Sample" & junction_chrom==bait_chrom)
+  sample_ranges = GenomicRanges::makeGRangesFromDataFrame(sample_df %>% dplyr::mutate(end=junction_end, start=junction_start, seqnames=junction_chrom), keep.extra.columns=T)
+  control_df = junctions_df %>% dplyr::filter(experimental_condition=="Control" & junction_chrom==bait_chrom)
+  control_ranges = GenomicRanges::makeGRangesFromDataFrame(control_df %>% dplyr::mutate(end=junction_end, start=junction_start, seqnames=junction_chrom), keep.extra.columns=T)
+  params = call_peaks_params(binsize=1e5, binstep=1e4, extend=1e5, llocal=2e6, minqvalue=0.01, maxgap=5e5, minlen=200)
+  p = call_peaks(sample_ranges, control_ranges, genome_info, params)
+
+
+  # mm9_txdb.gtf = GenomicFeatures::makeTxDbFromGFF('data/mm9/mm9.refGene.gtf.gz', format="gtf")
+
 
 
   if(debug) {
-    genome_mm9 = Biostrings::readDNAStringSet("data/mm9/mm9.fa.gz", "fasta")
-    sample_peaks_df2offtargets = peaks2offtargets_identity(sample_peaks$peaks, targets_df, genome_mm9)
+    genome_mm9 = mccollect(list(read_mm9_job))[[1]]
+    sample_peaks_df2offtargets = peaks2offtargets_identity(p$sample, targets_df, genome_mm9)
     pdf(file="reports/duo_baseline_extend1e5_smooth2e6_bin1e5_step1e4_2.pdf", width=15, height=8)
     for(chr in paste0("chr", 1:19)) {
       print(chr)
@@ -338,24 +367,6 @@ call_peaks = function(sample_df, control_df=NULL, params=call_peaks_params(), de
   dev.off()
 
 
-  if(F) {
-    pdf(file="reports/raw_control_vs_sample.pdf", width=20, height=8)
-    chr = paste0("chr", 19)
-    d = dplyr::bind_rows(control_tiles_df.coverage %>% dplyr::mutate(experimental_condition="Control"), control_tiles_df.coverage %>% dplyr::mutate(experimental_condition="Sample")) %>%
-      dplyr::mutate(coverage=ifelse(coverage<50, coverage, NA_real_))
-    b = dplyr::bind_rows(control_df.baseline %>% dplyr::mutate(experimental_condition="Control"), sample_df.baseline %>% dplyr::mutate(experimental_condition="Sample")) %>%
-      dplyr::mutate(coverage_smooth=ifelse(coverage_smooth<50, coverage_smooth, NA_real_))
-    p = ggplot(d %>% dplyr::filter(seqnames %in% chr)) +
-      ggridges::geom_ridgeline(aes(y=experimental_condition, x=start, height=coverage, fill=experimental_condition), scale=0.1) +
-      ggridges::geom_ridgeline(aes(y=experimental_condition, x=start, height=coverage_smooth), scale=0.1, data=b %>% dplyr::filter(seqnames %in% chr), color="#FF0000", alpha=0.2, size=2) +
-      scale_x_continuous(breaks=scale_breaks) +
-      facet_wrap(~seqnames, scales="free_x", ncol=1) +
-      theme_bw(base_size=20)
-    print(p)
-    dev.off()
-  }
-
-
   #
   # VENN diagram overlap between SAMPLE and CONTROL
   #
@@ -392,58 +403,4 @@ call_peaks = function(sample_df, control_df=NULL, params=call_peaks_params(), de
     grid.draw(p)
     dev.off()
   }
-
-}
-
-main = function() {
-  chromosomes_map_df = readr::read_tsv("data/mm9_chromosomes_synonyms.tsv")
-
-  # Read offtargets
-  offtargets_df = readr::read_tsv("data/offtargets_predicted.tsv") %>%
-    dplyr::inner_join(chromosomes_map_df, by=c("bait_chrom"="chrom_synonym")) %>%
-    dplyr::mutate(bait_chrom=unique_chrom) %>%
-    dplyr::select(-unique_chrom) %>%
-    dplyr::inner_join(chromosomes_map_df, by=c("offtarget_chrom"="chrom_synonym")) %>%
-    dplyr::mutate(offtarget_chrom=unique_chrom) %>%
-    dplyr::select(-unique_chrom) %>%
-    dplyr::mutate(offtarget_id=1:n()) %>%
-    dplyr::filter(offtarget_mismatches<=4)
-  targets_df = offtargets_df %>%
-    dplyr::filter(offtarget_mismatches==0)
-
-  #
-  # Calculate normalization accross experiment
-  #
-  junctions_df = read_junctions("data/breaks_tlx") %>%
-    dplyr::inner_join(chromosomes_map_df, by=c("bait_chrom"="chrom_synonym")) %>%
-    dplyr::mutate(bait_chrom=unique_chrom) %>%
-    dplyr::select(-unique_chrom) %>%
-    dplyr::inner_join(chromosomes_map_df, by=c("junction_chrom"="chrom_synonym")) %>%
-    dplyr::mutate(junction_chrom=unique_chrom) %>%
-    dplyr::select(-unique_chrom)
-  scale_factor_df = junctions_df %>%
-    dplyr::group_by(condition, bait_chrom) %>%
-    dplyr::summarise(libsize=n()) %>%
-    dplyr::mutate(libsize_median=median(libsize)) %>%
-    dplyr::mutate(scale_factor=libsize_median/libsize) %>%
-    dplyr::select(condition, bait_chrom, scale_factor)
-  junctions_df = junctions_df %>%
-    dplyr::select(-dplyr::matches("scale_factor")) %>%
-    dplyr::inner_join(scale_factor_df, by=c("condition", "bait_chrom"))
-
-  rdc_cols = readr::cols(rdc_cluster = col_character(), rdc_chrom = col_character(), rdc_start = col_double(), rdc_end = col_double(), rdc_group = col_double(), rdc_gene = col_character())
-  rdc_df = readr::read_tsv("data/rdc_pnas.tsv", col_types=rdc_cols) %>%
-    dplyr::mutate(rdc_length=rdc_end-rdc_start) %>%
-    tidyr::separate_rows(rdc_gene, sep=" *, *") %>%
-    dplyr::filter(rdc_gene != "--") %>%
-    dplyr::group_by(rdc_gene) %>%
-    dplyr::slice(1) %>%
-    dplyr::ungroup() %>%
-    dplyr::mutate(rdc_id=1:n())
-
-
-  sample_df = junctions_df %>% dplyr::filter(experimental_condition=="Sample")
-  control_df = junctions_df %>% dplyr::filter(experimental_condition=="Control")
-  call_peaks_params = call_peaks_params(binsize=1e5, binstep=1e4, extend=1e5, llocal=2e6, minqvalue=0.01, maxgap=5e5, minlen=200)
-  p = call_peaks(sample_df, control_df)
 }
