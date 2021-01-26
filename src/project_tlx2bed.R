@@ -9,34 +9,33 @@ library(foreach)
 library(doParallel)
 library(qvalue)
 library(Gviz)
-library(future)
 source("src/utilities.R")
 source("src/visualization.R")
 
 
-peaks2offtargets_identity = function(peaks_df, offtargets_df, genome_mm9) {
-  peaks_sequences = Biostrings::getSeq(genome_mm9, GenomicRanges::makeGRangesFromDataFrame(peaks_df %>% dplyr::mutate(seqnames=peak_chrom, start=peak_start, end=peak_end), keep.extra.columns=T))
-  peaks_df$peak_sequence = as.character(peaks_sequences)
-  peaks_df$peak_sequence_rev = as.character(Biostrings::reverseComplement(peaks_sequences))
-  peaks_df = peaks_df %>%
+islands2offtargets_identity = function(islands_df, offtargets_df, genome_mm9) {
+  islands_sequences = Biostrings::getSeq(genome_mm9, GenomicRanges::makeGRangesFromDataFrame(islands_df %>% dplyr::mutate(seqnames=island_chrom, start=island_start, end=island_end), keep.extra.columns=T))
+  islands_df$island_sequence = as.character(islands_sequences)
+  islands_df$island_sequence_rev = as.character(Biostrings::reverseComplement(islands_sequences))
+  islands_df = islands_df %>%
     dplyr::select(-dplyr::matches("^offtarget_")) %>%
-    dplyr::inner_join(offtargets_df %>% dplyr::select(bait_chrom, offtarget_primer_sequence), by=c("peak_chrom"="bait_chrom"))
-  alignments = Biostrings::pairwiseAlignment(peaks_df$offtarget_primer_sequence, peaks_df$peak_sequence, type="global-local", gapOpening=10, gapExtension=4)
-  alignments_rev = Biostrings::pairwiseAlignment(peaks_df$offtarget_primer_sequence, peaks_df$peak_sequence_rev, type="global-local", gapOpening=10, gapExtension=4)
+    dplyr::inner_join(offtargets_df %>% dplyr::select(bait_chrom, offtarget_primer_sequence), by=c("island_chrom"="bait_chrom"))
+  alignments = Biostrings::pairwiseAlignment(islands_df$offtarget_primer_sequence, islands_df$island_sequence, type="global-local", gapOpening=10, gapExtension=4)
+  alignments_rev = Biostrings::pairwiseAlignment(islands_df$offtarget_primer_sequence, islands_df$island_sequence_rev, type="global-local", gapOpening=10, gapExtension=4)
   alignments = c(alignments, alignments_rev)
-  peaks_df = rbind(peaks_df, peaks_df)
-  peaks_df$bait_alignment_direction = rep(c("sense", "antisense"), each=nrow(peaks_df)/2)
-  peaks_df$bait_alignment_nchar=Biostrings::nchar(alignments)
-  peaks_df$bait_sequence=as.character(Biostrings::pattern(alignments))
-  peaks_df$bait_alignment_sequence=as.character(Biostrings::subject(alignments))
-  peaks_df$bait_alignment_score=Biostrings::score(alignments)
-  peaks_df$bait_alignment_identity=Biostrings::pid(alignments)
-  peaks_df = peaks_df %>%
+  islands_df = rbind(islands_df, islands_df)
+  islands_df$bait_alignment_direction = rep(c("sense", "antisense"), each=nrow(islands_df)/2)
+  islands_df$bait_alignment_nchar=Biostrings::nchar(alignments)
+  islands_df$bait_sequence=as.character(Biostrings::pattern(alignments))
+  islands_df$bait_alignment_sequence=as.character(Biostrings::subject(alignments))
+  islands_df$bait_alignment_score=Biostrings::score(alignments)
+  islands_df$bait_alignment_identity=Biostrings::pid(alignments)
+  islands_df = islands_df %>%
     dplyr::arrange(dplyr::desc(bait_alignment_identity)) %>%
     dplyr::filter(bait_alignment_nchar>0) %>%
-    dplyr::distinct(peak_chrom, peak_id, offtarget_primer_sequence, .keep_all=T)
+    dplyr::distinct(island_chrom, island_id, offtarget_primer_sequence, .keep_all=T)
 
-  peaks_df
+  islands_df
 }
 
 fit_baseline = function(coverage_df, binstep, llocal) {
@@ -155,11 +154,11 @@ calculate_coverage2 = function(ranges, genome_info, params) {
   coverage_df
 }
 
-call_peaks_params = function(binsize=1e5, binstep=1e4, extend=1e5, llocal=2e6, minqvalue=0.01, maxgap=5e5, minlen=200) {
+call_islands_params = function(binsize=1e5, binstep=1e4, extend=1e5, llocal=2e6, minqvalue=0.01, maxgap=5e5, minlen=200) {
   list(binsize=binsize, binstep=binstep, extend=extend, llocal=llocal, minqvalue=-log10(minqvalue), maxgap=maxgap, minlen=minlen)
 }
 
-call_peaks = function(sample_ranges, control_ranges, genome_info, params=call_peaks_params(), debug=F) {
+call_islands = function(sample_ranges, control_ranges, genome_info, params=call_islands_params(), debug=F) {
   # Prepare tiles
   genome_tiles = unlist(tileGenome(genome_info, tilewidth=params$binsize))
   genome_tiles$tile_id = 1:length(genome_tiles)
@@ -232,27 +231,31 @@ call_peaks = function(sample_ranges, control_ranges, genome_info, params=call_pe
     dplyr::select(seqnames, start, end, coverage, coverage_smooth, pvalue, qvalue, coverage_th01)
 
 
-  sample_peaks = macs_call_peaks(
+  sample_islands = macs_call_islands(
     signal_df=sample_tiles_df.coverage %>% dplyr::select(seqnames, start, end, coverage),
     background_df=mixed_df.baseline %>% dplyr::select(seqnames, start, end, coverage=coverage_smooth),
     minqvalue=params$minqvalue, maxgap=params$maxgap, minlen=params$minlen)
 
-  control_peaks = macs_call_peaks(
+  control_islands = macs_call_islands(
     signal_df=control_tiles_df.coverage %>% dplyr::select(seqnames, start, end, coverage),
     background_df=control_df.baseline %>% dplyr::select(seqnames, start, end, coverage=coverage_smooth),
     minqvalue=params$minqvalue, maxgap=params$maxgap, minlen=params$minlen)
 
-  sample_peaks_ranges = GenomicRanges::makeGRangesFromDataFrame(sample_peaks$peaks %>% dplyr::select(seqnames=peak_chrom, start=peak_start, end=peak_end, peak_id.sample=peak_id), keep.extra.columns=T)
-  control_peaks_ranges = GenomicRanges::makeGRangesFromDataFrame(control_peaks$peaks %>% dplyr::select(seqnames=peak_chrom, start=peak_start, end=peak_end, peak_id.control=peak_id), keep.extra.columns=T)
-  control_qvalues_ranges = GenomicRanges::makeGRangesFromDataFrame(control_peaks$qvalues %>% dplyr::select(seqnames=qvalue_chrom, start=qvalue_start, end=qvalue_end, qvalue_score.control=qvalue_score), keep.extra.columns=T)
-  sample2control_peaks.map = as.data.frame(IRanges::mergeByOverlaps(sample_peaks_ranges, control_qvalues_ranges)) %>% dplyr::select(peak_id.sample, qvalue_score.control)
-  sample_peaks$peaks = sample_peaks$peaks %>%
+  sample_islands_ranges = GenomicRanges::makeGRangesFromDataFrame(sample_islands$islands %>% dplyr::select(seqnames=island_chrom, start=island_start, end=island_end, island_id.sample=island_id), keep.extra.columns=T)
+  control_islands_ranges = GenomicRanges::makeGRangesFromDataFrame(control_islands$islands %>% dplyr::select(seqnames=island_chrom, start=island_start, end=island_end, island_id.control=island_id), keep.extra.columns=T)
+  control_qvalues_ranges = GenomicRanges::makeGRangesFromDataFrame(control_islands$qvalues %>% dplyr::select(seqnames=qvalue_chrom, start=qvalue_start, end=qvalue_end, qvalue_score.control=qvalue_score), keep.extra.columns=T)
+  sample2control_islands.map = as.data.frame(IRanges::mergeByOverlaps(sample_islands_ranges, control_qvalues_ranges)) %>% dplyr::select(island_id.sample, qvalue_score.control)
+  sample_islands$islands = sample_islands$islands %>%
     dplyr::select(-dplyr::matches("^qvalue_score.control$")) %>%
-    dplyr::left_join(sample2control_peaks.map, by=c("peak_id"="peak_id.sample")) %>%
+    dplyr::left_join(sample2control_islands.map, by=c("island_id"="island_id.sample")) %>%
     dplyr::arrange(dplyr::desc(qvalue_score.control)) %>%
-    dplyr::distinct(peak_id, .keep_all=T)
+    dplyr::distinct(island_id, .keep_all=T)
 
-  list(sample=sample_peaks$peaks, control=control_peaks$peaks)
+  list(
+    islands=list(sample=sample_islands$islands, control=control_islands$islands),
+    baseline=list(sample=sample_df.baseline, control=control_df.baseline_adjusted, mixed=mixed_df.baseline),
+    coverage=list(sample=sample_tiles_df.coverage, control=control_tiles_df.coverage)
+  )
 }
 
 main = function() {
@@ -316,8 +319,8 @@ main = function() {
   sample_ranges = GenomicRanges::makeGRangesFromDataFrame(sample_df %>% dplyr::mutate(end=junction_end, start=junction_start, seqnames=junction_chrom), keep.extra.columns=T)
   control_df = junctions_df %>% dplyr::filter(experimental_condition=="Control" & junction_chrom==bait_chrom)
   control_ranges = GenomicRanges::makeGRangesFromDataFrame(control_df %>% dplyr::mutate(end=junction_end, start=junction_start, seqnames=junction_chrom), keep.extra.columns=T)
-  params = call_peaks_params(binsize=1e5, binstep=1e4, extend=1e5, llocal=2e6, minqvalue=0.01, maxgap=5e5, minlen=200)
-  p = call_peaks(sample_ranges, control_ranges, genome_info, params)
+  params = call_islands_params(binsize=1e5, binstep=1e4, extend=1e5, llocal=2e6, minqvalue=0.01, maxgap=5e5, minlen=200)
+  results = call_islands(sample_ranges, control_ranges, genome_info, params)
 
 
   # mm9_txdb.gtf = GenomicFeatures::makeTxDbFromGFF('data/mm9/mm9.refGene.gtf.gz', format="gtf")
@@ -326,30 +329,32 @@ main = function() {
 
   if(debug) {
     genome_mm9 = mccollect(list(read_mm9_job))[[1]]
-    sample_peaks_df2offtargets = peaks2offtargets_identity(p$sample, targets_df, genome_mm9)
+    sample_islands_df2offtargets = islands2offtargets_identity(results$islands$sample, targets_df, genome_mm9)
     pdf(file="reports/duo_baseline_extend1e5_smooth2e6_bin1e5_step1e4_2.pdf", width=15, height=8)
+    pdf(file="test.pdf", width=15, height=8)
     for(chr in paste0("chr", 1:19)) {
       print(chr)
-      coverage_df = dplyr::bind_rows(control_tiles_df.coverage %>% dplyr::mutate(experimental_condition="Control"), sample_tiles_df.coverage %>% dplyr::mutate(experimental_condition="Sample")) %>%
-         dplyr::filter(seqnames %in% chr)
+      coverage_df = dplyr::bind_rows(
+        results$coverage$control %>% dplyr::mutate(experimental_condition="Control"),
+        results$coverage$sample %>% dplyr::mutate(experimental_condition="Sample")) %>%
+        dplyr::filter(seqnames %in% chr)
       baseline_df = dplyr::bind_rows(
-        control_df.baseline_adjusted %>% dplyr::mutate(experimental_condition="Control"),
-        sample_df.baseline %>% dplyr::mutate(experimental_condition="Sample"),
-        mixed_df.baseline %>% dplyr::mutate(experimental_condition="Max")) %>%
+        results$baseline$control %>% dplyr::mutate(experimental_condition="Control"),
+        results$baseline$sample %>% dplyr::mutate(experimental_condition="Sample"),
+        results$baseline$mixed %>% dplyr::mutate(experimental_condition="Max")) %>%
          dplyr::filter(seqnames %in% chr)
-      peaks_df = dplyr::bind_rows(
-        control_peaks$peaks %>% dplyr::mutate(experimental_condition="Control"),
-        sample_peaks$peaks %>% dplyr::mutate(experimental_condition="Sample"),
-        sample_peaks$peaks %>% dplyr::filter(qvalue_score.control < peak_summit_qvalue) %>%  dplyr::mutate(condition="Sample filtered"),
-        sample_peaks_df2offtargets %>% dplyr::mutate(seqnames=peak_chrom, peak_summit_qvalue=bait_alignment_identity, score=(bait_alignment_identity-min(bait_alignment_identity))/(100-max(bait_alignment_identity))*max(coverage_df$coverage), condition="Offtarget"),
-        rdc %>% dplyr::mutate(experimental_condition="RDC", peak_start=rdc_start, peak_end=rdc_end, peak_chrom=rdc_chrom)) %>%
-         dplyr::mutate(seqnames=peak_chrom, score=max(coverage_df$coverage)) %>%
+      islands_df = dplyr::bind_rows(
+        results$islands$control %>% dplyr::mutate(experimental_condition="Control"),
+        results$islands$sample %>% dplyr::mutate(experimental_condition="Sample"),
+        sample_islands_df2offtargets %>% dplyr::mutate(seqnames=island_chrom, island_summit_qvalue=bait_alignment_identity, score=(bait_alignment_identity-min(bait_alignment_identity))/(100-max(bait_alignment_identity))*max(coverage_df$coverage), condition="Offtarget"),
+        rdc_df %>% dplyr::mutate(experimental_condition="RDC", island_start=rdc_start, island_end=rdc_end, island_chrom=rdc_chrom)) %>%
+         dplyr::mutate(seqnames=island_chrom, score=max(results$coverage$sample$coverage)) %>%
          dplyr::filter(seqnames %in% chr)
       karyoplot.colors=c(enriched="#0000FF", Control="#000000", Sample="#FF0000", Offtarget="#00FF00", "Sample filtered"="#FF0000", Max="#0000FF", Coverage="#000000", RDC="#FFFF00")
       p = ggplot_karyoplot(
         coverage_df=coverage_df,
         baseline_df=baseline_df,
-        peaks_df=peaks_df,
+        islands_df=islands_df,
         colors=karyoplot.colors
       )
       print(p)
@@ -359,11 +364,11 @@ main = function() {
 
 
 
-  jpeg("reports/rdc2peaks_venn.jpg", width=800, height=800)
-  peaks_filtered_df = sample_peaks$peaks %>% dplyr::filter(qvalue_score.control < peak_summit_qvalue) %>%  dplyr::mutate(condition="Sample filtered")
+  jpeg("reports/rdc2islands_venn.jpg", width=800, height=800)
+  islands_filtered_df = sample_islands$islands %>% dplyr::filter(qvalue_score.control < island_summit_qvalue) %>%  dplyr::mutate(condition="Sample filtered")
   rdc_ranges = GenomicRanges::makeGRangesFromDataFrame(rdc %>% dplyr::mutate(seqnames=rdc_chrom, start=rdc_start, end=rdc_end), keep.extra.columns=T)
-  peaks_filtered_ranges = GenomicRanges::makeGRangesFromDataFrame(peaks_filtered_df %>% dplyr::mutate(seqnames=peak_chrom, start=peak_start, end=peak_end), keep.extra.columns=T)
-  venn_ranges(rdc_ranges, peaks_filtered_ranges, name1="RDC", name2="Peak")
+  islands_filtered_ranges = GenomicRanges::makeGRangesFromDataFrame(islands_filtered_df %>% dplyr::mutate(seqnames=island_chrom, start=island_start, end=island_end), keep.extra.columns=T)
+  venn_ranges(rdc_ranges, islands_filtered_ranges, name1="RDC", name2="island")
   dev.off()
 
 
@@ -371,22 +376,22 @@ main = function() {
   # VENN diagram overlap between SAMPLE and CONTROL
   #
   if(debug) {
-    control_peaks_ranges = GenomicRanges::makeGRangesFromDataFrame(control_peaks$peaks, end.field="peak_end", start.field="peak_start", seqnames.field="peak_chrom", keep.extra.columns=T)
-    sample_peaks_ranges = GenomicRanges::makeGRangesFromDataFrame(sample_peaks$peaks, end.field="peak_end", start.field="peak_start", seqnames.field="peak_chrom", keep.extra.columns=T)
-    sample2control.map = as.data.frame(GenomicRanges::findOverlaps(control_peaks_ranges, sample_peaks_ranges))
-    x = sample_peaks$peaks %>%
-      dplyr::rename(peak_id.sample="peak_id") %>%
-      dplyr::full_join(sample2control.map %>% dplyr::rename(peak_id.control="queryHits"), by=c("peak_id.sample"="subjectHits")) %>%
-      dplyr::full_join(control_peaks$peaks, by=c("peak_id.control"="peak_id")) %>%
+    control_islands_ranges = GenomicRanges::makeGRangesFromDataFrame(control_islands$islands, end.field="island_end", start.field="island_start", seqnames.field="island_chrom", keep.extra.columns=T)
+    sample_islands_ranges = GenomicRanges::makeGRangesFromDataFrame(sample_islands$islands, end.field="island_end", start.field="island_start", seqnames.field="island_chrom", keep.extra.columns=T)
+    sample2control.map = as.data.frame(GenomicRanges::findOverlaps(control_islands_ranges, sample_islands_ranges))
+    x = sample_islands$islands %>%
+      dplyr::rename(island_id.sample="island_id") %>%
+      dplyr::full_join(sample2control.map %>% dplyr::rename(island_id.control="queryHits"), by=c("island_id.sample"="subjectHits")) %>%
+      dplyr::full_join(control_islands$islands, by=c("island_id.control"="island_id")) %>%
       setNames(gsub("\\.x$", ".sample", colnames(.))) %>%
       setNames(gsub("\\.y$", ".control", colnames(.)))
 
-    names.common_control = unique(x %>% dplyr::filter(!is.na(peak_id.control) & !is.na(peak_id.sample)) %>% .$peak_id.control)
-    names.common_sample = unique(x %>% dplyr::filter(!is.na(peak_id.control) & !is.na(peak_id.sample)) %>% .$peak_id.sample)
+    names.common_control = unique(x %>% dplyr::filter(!is.na(island_id.control) & !is.na(island_id.sample)) %>% .$island_id.control)
+    names.common_sample = unique(x %>% dplyr::filter(!is.na(island_id.control) & !is.na(island_id.sample)) %>% .$island_id.sample)
     if(length(names.common_control) > length(names.common_sample)) { names.common = names.common_control } else { names.common = names.common_sample }
     names.common  = paste("Common", names.common)
-    names.sample = c(paste("Sample", unique(x %>% dplyr::filter(is.na(peak_id.control) & !is.na(peak_id.sample)) %>% .$peak_id.sample)), names.common)
-    names.control = c(paste("Control", unique(x %>% dplyr::filter(!is.na(peak_id.control) & is.na(peak_id.sample)) %>% .$peak_id.control)), names.common)
+    names.sample = c(paste("Sample", unique(x %>% dplyr::filter(is.na(island_id.control) & !is.na(island_id.sample)) %>% .$island_id.sample)), names.common)
+    names.control = c(paste("Control", unique(x %>% dplyr::filter(!is.na(island_id.control) & is.na(island_id.sample)) %>% .$island_id.control)), names.common)
 
     # Chart
     p = VennDiagram::venn.diagram(

@@ -32,11 +32,11 @@ venn_ranges = function(r1, r2, name1, name2) {
   grid::grid.draw(p)
 }
 
-macs_call_peaks = function(signal_df, background_df, matching_tiles=T, minqvalue, maxgap, minlen) {
+macs_call_islands = function(signal_df, background_df, matching_tiles=T, minqvalue, maxgap, minlen) {
   qvalue_path = "data/macs2/bdgcmp_qvalue.bdg"
-  peaks_path = "data/macs2/bdgcmp_peaks.bed"
+  islands_path = "data/macs2/bdgcmp_islands.bed"
 
-  # Call peaks
+  # Call islands
   if(matching_tiles) {
     qvalues_df = background_df %>%
       dplyr::select(seqnames, start, end, coverage.control=coverage) %>%
@@ -61,44 +61,43 @@ macs_call_peaks = function(signal_df, background_df, matching_tiles=T, minqvalue
       dplyr::mutate(qvalue_id=1:n())
   }
 
-  system(stringr::str_glue("macs2 bdgpeakcall -i {qvalue} -c {cutoff} --min-length {format(peak_min_length, scientific=F)} --max-gap {format(peak_max_gap, scientific=F)} -o {output}",
-       qvalue=qvalue_path, output=peaks_path, cutoff=minqvalue, peak_max_gap=maxgap, peak_min_length=minlen))
+  system(stringr::str_glue("macs2 bdgpeakcall -i {qvalue} -c {cutoff} --min-length {format(island_min_length, scientific=F)} --max-gap {format(island_max_gap, scientific=F)} -o {output}",
+       qvalue=qvalue_path, output=islands_path, cutoff=minqvalue, island_max_gap=maxgap, island_min_length=minlen))
 
   # Read results file
-  peaks_cols = cols(
-    peak_chrom=col_character(), peak_start=col_double(), peak_end=col_double(), peak_length=col_character(), peak_summit_abs=col_double(),
-    peak_score=col_character(), peak_fc=col_double(), peak_pvalue_log10=col_double(), peak_qvalue_log10=col_double(), peak_sammit_offset=col_double()
+  islands_cols = cols(
+    island_chrom=col_character(), island_start=col_double(), island_end=col_double(), island_length=col_character(), island_summit_abs=col_double(),
+    island_score=col_character(), island_fc=col_double(), island_pvalue_log10=col_double(), island_qvalue_log10=col_double(), island_sammit_offset=col_double()
   )
-  peaks_df = readr::read_tsv(peaks_path, skip=1, col_names=names(peaks_cols$cols), col_types=peaks_cols) %>%
-    dplyr::mutate(peak_summit_pos=peak_start + peak_sammit_offset) %>%
-    dplyr::select(peak_chrom, peak_start, peak_end, peak_summit_pos)
+  islands_df = readr::read_tsv(islands_path, skip=1, col_names=names(islands_cols$cols), col_types=islands_cols) %>%
+    dplyr::mutate(island_summit_pos=island_start + island_sammit_offset) %>%
+    dplyr::select(island_chrom, island_start, island_end, island_summit_pos)
 
-  if(nrow(peaks_df)>0) {
-    peaks_df = peaks_df %>% dplyr::mutate(peak_id=1:n())
+  if(nrow(islands_df)>0) {
+    islands_df = islands_df %>% dplyr::mutate(island_id=1:n())
     qvalues_ranges = GenomicRanges::makeGRangesFromDataFrame(qvalues_df %>% dplyr::mutate(end=qvalue_end, start=qvalue_start, seqnames=qvalue_chrom), keep.extra.columns=T)
-    summit_ranges = GenomicRanges::makeGRangesFromDataFrame(peaks_df %>% dplyr::mutate(end=peak_summit_pos, start=peak_summit_pos, seqnames=peak_chrom), keep.extra.columns=T)
-    sample_ranges = GenomicRanges::makeGRangesFromDataFrame(signal_df %>% dplyr::mutate(break_chrom=seqnames, break_start=start, break_end=end, break_coverage=coverage), keep.extra.columns=T)
+    summit_ranges = GenomicRanges::makeGRangesFromDataFrame(islands_df %>% dplyr::mutate(end=island_summit_pos, start=island_summit_pos, seqnames=island_chrom), keep.extra.columns=T)
+    sample_ranges = GenomicRanges::makeGRangesFromDataFrame(signal_df %>% dplyr::mutate(junction_chrom=seqnames, junction_start=start, junction_end=end, junction_coverage=coverage), keep.extra.columns=T)
     summit2qvalue.map = as.data.frame(IRanges::mergeByOverlaps(qvalues_ranges, summit_ranges)) %>%
-      dplyr::filter(qvalue_chrom==peak_chrom) %>%
-      dplyr::group_by(peak_id) %>%
-      dplyr::summarise(peak_summit_qvalue=max(qvalue_score), .groups="keep")
+      dplyr::filter(qvalue_chrom==island_chrom) %>%
+      dplyr::group_by(island_id) %>%
+      dplyr::summarise(island_summit_qvalue=max(qvalue_score), .groups="keep")
     summit2sample.map = as.data.frame(IRanges::mergeByOverlaps(sample_ranges, summit_ranges)) %>%
-      dplyr::filter(break_chrom==break_chrom) %>%
-      dplyr::group_by(peak_id) %>%
-      dplyr::summarise(peak_summit_abs=max(break_coverage), .groups="keep")
+      dplyr::group_by(island_id) %>%
+      dplyr::summarise(island_summit_abs=max(junction_coverage), .groups="keep")
 
-    peaks_df = peaks_df %>%
-      dplyr::select(-dplyr::matches("peak_summit_abs|peak_summit_qvalue")) %>%
-      dplyr::select(-dplyr::matches("peak_summit_qvalue")) %>%
-      dplyr::inner_join(summit2qvalue.map, by=c("peak_id")) %>%
-      dplyr::select(-dplyr::matches("peak_summit_abs")) %>%
-      dplyr::inner_join(summit2sample.map, by=c("peak_id"))
+    islands_df = islands_df %>%
+      dplyr::select(-dplyr::matches("island_summit_abs|island_summit_qvalue")) %>%
+      dplyr::select(-dplyr::matches("island_summit_qvalue")) %>%
+      dplyr::inner_join(summit2qvalue.map, by=c("island_id")) %>%
+      dplyr::select(-dplyr::matches("island_summit_abs")) %>%
+      dplyr::inner_join(summit2sample.map, by=c("island_id"))
   } else {
-    peaks_df$peak_id = c()
-    peaks_df$peak_summit_qvalue = c()
-    peaks_df$peak_summit_abs = c()
-    peaks_df$peak_summit_pos = c()
+    islands_df$island_id = c()
+    islands_df$island_summit_qvalue = c()
+    islands_df$island_summit_abs = c()
+    islands_df$island_summit_pos = c()
   }
 
-  list(peaks=peaks_df, qvalues=qvalues_df)
+  list(islands=islands_df, qvalues=qvalues_df)
 }
