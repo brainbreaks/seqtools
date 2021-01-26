@@ -1,4 +1,37 @@
 library(ggplot2)
+library(VennDiagram)
+library(dplyr)
+library(RColorBrewer)
+library(IRanges)
+library(GenomicRanges)
+
+venn_ranges = function(r1, r2, name1, name2) {
+  r1$r1_id = 1:length(r1)
+  r1_df = as.data.frame(r1)
+  r2$r2_id = 1:length(r2)
+  r2_df = as.data.frame(r2)
+  r1_r2.map = as.data.frame(IRanges::mergeByOverlaps(r1, r2)) %>% dplyr::select(r1_id, r2_id)
+
+  r1.names = paste("R1", r1_df %>% dplyr::anti_join(r1_r2.map, by="r1_id") %>% .$r1_id)
+  r2.names = paste("R2", r2_df %>% dplyr::anti_join(r1_r2.map, by="r2_id") %>% .$r2_id)
+  common.names = unique(paste("R1+R2", apply(r1_df %>% dplyr::inner_join(r1_r2.map, by="r1_id") %>% dplyr::select(r1_id, r2_id), 1, paste, collapse="_")))
+  r1.names = unique(c(r1.names, common.names))
+  r2.names = unique(c(r2.names, common.names))
+
+  # Chart
+  p = VennDiagram::venn.diagram(
+    x = list(r1.names, r2.names),
+    category.names = c(name1 , name2),
+    lwd = 2,
+    lty = 'blank',
+    fill = RColorBrewer::brewer.pal(3, "Pastel2")[1:2],
+    cat.cex = 2,
+    cat.fontface = "bold",
+    filename = NULL
+  )
+
+  grid::grid.draw(p)
+}
 
 scale_breaks = function(x) {
     breaks = seq(0, max(x), 1e7)

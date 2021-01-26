@@ -80,8 +80,8 @@ groseq2break.f.map = as.data.frame(IRanges::mergeByOverlaps(groseq_ranges.f, bre
   dplyr::select(groseq_id=groseq_id, break_id=break_id)
 
 groseq2break.f = groseq.f %>%
-  dplyr::inner_join(groseq2break.f.map, by=c("groseq_id")) %>%
-  dplyr::inner_join(breaks.f, by=c("break_id")) %>%
+  dplyr::inner_join(groseq2break.f.map, by="groseq_id") %>%
+  dplyr::inner_join(breaks.f, by="break_id") %>%
   dplyr::group_by(break_sample, break_bait_chrom, break_exp_condition, groseq_chrom, groseq_gene, groseq_strand, groseq_length, groseq_rpkm) %>%
   dplyr::summarise(breaks_count=n()) %>%
   dplyr::inner_join(libsizes.f, by=c("break_sample", "groseq_chrom"="break_chrom")) %>%

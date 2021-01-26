@@ -266,25 +266,7 @@ main = function() {
              GenomeInfoDb::Seqinfo(seqnames, seqlengths, isCircular=rep(F, length(seqnames)), genome=rep("mm9", length(seqnames))))
   genome_info = genome_info[paste0("chr", c(1:19, "X", "Y"))]
 
-
-
   chromosomes_map_df = readr::read_tsv("data/mm9_chromosomes_synonyms.tsv")
-
-  # Read offtargets
-  offtargets_cols = readr::cols(bait_name=col_character(), bait_chrom=col_character(),
-    offtarget_chrom=col_character(), offtarget_strand=col_character(), offtarget_start=col_double(), offtarget_end=col_double(),
-    offtarget_mismatches=col_double(), offtarget_primer_sequence=col_character(), offtarget_sequence=col_character())
-  offtargets_df = readr::read_tsv("data/offtargets_predicted.tsv", col_types=offtargets_cols) %>%
-    dplyr::inner_join(chromosomes_map_df, by=c("bait_chrom"="chrom_synonym")) %>%
-    dplyr::mutate(bait_chrom=unique_chrom) %>%
-    dplyr::select(-unique_chrom) %>%
-    dplyr::inner_join(chromosomes_map_df, by=c("offtarget_chrom"="chrom_synonym")) %>%
-    dplyr::mutate(offtarget_chrom=unique_chrom) %>%
-    dplyr::select(-unique_chrom) %>%
-    dplyr::mutate(offtarget_id=1:n()) %>%
-    dplyr::filter(offtarget_mismatches<=4)
-  targets_df = offtargets_df %>%
-    dplyr::filter(offtarget_mismatches==0)
 
   #
   # Calculate normalization accross experiment
@@ -307,14 +289,6 @@ main = function() {
     dplyr::select(-dplyr::matches("scale_factor")) %>%
     dplyr::inner_join(scale_factor_df, by=c("experimental_condition", "bait_chrom"))
 
-  rdc_cols = readr::cols(rdc_cluster=col_character(), rdc_chrom=col_character(), rdc_start=col_double(), rdc_end=col_double(), rdc_group=col_double(), rdc_gene=col_character())
-  rdc_df = readr::read_tsv("data/rdc_pnas.tsv", col_types=rdc_cols) %>%
-    dplyr::inner_join(chromosomes_map_df, by=c("rdc_chrom"="chrom_synonym")) %>%
-    dplyr::mutate(rdc_chrom=unique_chrom) %>%
-    dplyr::select(-unique_chrom) %>%
-    dplyr::mutate(rdc_length=rdc_end-rdc_start) %>%
-    dplyr::mutate(rdc_id=1:n())
-
   sample_df = junctions_df %>% dplyr::filter(experimental_condition=="Sample" & junction_chrom==bait_chrom)
   sample_ranges = GenomicRanges::makeGRangesFromDataFrame(sample_df %>% dplyr::mutate(end=junction_end, start=junction_start, seqnames=junction_chrom), keep.extra.columns=T)
   control_df = junctions_df %>% dplyr::filter(experimental_condition=="Control" & junction_chrom==bait_chrom)
@@ -328,6 +302,32 @@ main = function() {
 
 
   if(debug) {
+
+    rdc_cols = readr::cols(rdc_cluster=col_character(), rdc_chrom=col_character(), rdc_start=col_double(), rdc_end=col_double(), rdc_group=col_double(), rdc_gene=col_character())
+    rdc_df = readr::read_tsv("data/rdc_pnas.tsv", col_types=rdc_cols) %>%
+      dplyr::inner_join(chromosomes_map_df, by=c("rdc_chrom"="chrom_synonym")) %>%
+      dplyr::mutate(rdc_chrom=unique_chrom) %>%
+      dplyr::select(-unique_chrom) %>%
+      dplyr::mutate(rdc_length=rdc_end-rdc_start) %>%
+      dplyr::mutate(rdc_id=1:n())
+
+    # Read offtargets
+    offtargets_cols = readr::cols(bait_name=col_character(), bait_chrom=col_character(),
+      offtarget_chrom=col_character(), offtarget_strand=col_character(), offtarget_start=col_double(), offtarget_end=col_double(),
+      offtarget_mismatches=col_double(), offtarget_primer_sequence=col_character(), offtarget_sequence=col_character())
+    offtargets_df = readr::read_tsv("data/offtargets_predicted.tsv", col_types=offtargets_cols) %>%
+      dplyr::inner_join(chromosomes_map_df, by=c("bait_chrom"="chrom_synonym")) %>%
+      dplyr::mutate(bait_chrom=unique_chrom) %>%
+      dplyr::select(-unique_chrom) %>%
+      dplyr::inner_join(chromosomes_map_df, by=c("offtarget_chrom"="chrom_synonym")) %>%
+      dplyr::mutate(offtarget_chrom=unique_chrom) %>%
+      dplyr::select(-unique_chrom) %>%
+      dplyr::mutate(offtarget_id=1:n()) %>%
+      dplyr::filter(offtarget_mismatches<=4)
+    targets_df = offtargets_df %>%
+      dplyr::filter(offtarget_mismatches==0)
+
+
     genome_mm9 = mccollect(list(read_mm9_job))[[1]]
     sample_islands_df2offtargets = islands2offtargets_identity(results$islands$sample, targets_df, genome_mm9)
     pdf(file="reports/duo_baseline_extend1e5_smooth2e6_bin1e5_step1e4_2.pdf", width=15, height=8)
@@ -363,7 +363,9 @@ main = function() {
   }
 
 
-
+  #
+  # VENN diagram overlap RDC and sample islands
+  #
   jpeg("reports/rdc2islands_venn.jpg", width=800, height=800)
   islands_filtered_df = sample_islands$islands %>% dplyr::filter(qvalue_score.control < island_summit_qvalue) %>%  dplyr::mutate(condition="Sample filtered")
   rdc_ranges = GenomicRanges::makeGRangesFromDataFrame(rdc %>% dplyr::mutate(seqnames=rdc_chrom, start=rdc_start, end=rdc_end), keep.extra.columns=T)
@@ -375,37 +377,10 @@ main = function() {
   #
   # VENN diagram overlap between SAMPLE and CONTROL
   #
-  if(debug) {
-    control_islands_ranges = GenomicRanges::makeGRangesFromDataFrame(control_islands$islands, end.field="island_end", start.field="island_start", seqnames.field="island_chrom", keep.extra.columns=T)
-    sample_islands_ranges = GenomicRanges::makeGRangesFromDataFrame(sample_islands$islands, end.field="island_end", start.field="island_start", seqnames.field="island_chrom", keep.extra.columns=T)
-    sample2control.map = as.data.frame(GenomicRanges::findOverlaps(control_islands_ranges, sample_islands_ranges))
-    x = sample_islands$islands %>%
-      dplyr::rename(island_id.sample="island_id") %>%
-      dplyr::full_join(sample2control.map %>% dplyr::rename(island_id.control="queryHits"), by=c("island_id.sample"="subjectHits")) %>%
-      dplyr::full_join(control_islands$islands, by=c("island_id.control"="island_id")) %>%
-      setNames(gsub("\\.x$", ".sample", colnames(.))) %>%
-      setNames(gsub("\\.y$", ".control", colnames(.)))
+  jpeg("reports/control_vs_sample_venn.jpg", width=800, height=800)
+  control_islands_ranges = GenomicRanges::makeGRangesFromDataFrame(results$islands$control, end.field="island_end", start.field="island_start", seqnames.field="island_chrom", keep.extra.columns=T)
+  sample_islands_ranges = GenomicRanges::makeGRangesFromDataFrame(results$islands$sample, end.field="island_end", start.field="island_start", seqnames.field="island_chrom", keep.extra.columns=T)
+  venn_ranges(control_islands_ranges, sample_islands_ranges, name1="Control", name2="Sample")
+  dev.off()
 
-    names.common_control = unique(x %>% dplyr::filter(!is.na(island_id.control) & !is.na(island_id.sample)) %>% .$island_id.control)
-    names.common_sample = unique(x %>% dplyr::filter(!is.na(island_id.control) & !is.na(island_id.sample)) %>% .$island_id.sample)
-    if(length(names.common_control) > length(names.common_sample)) { names.common = names.common_control } else { names.common = names.common_sample }
-    names.common  = paste("Common", names.common)
-    names.sample = c(paste("Sample", unique(x %>% dplyr::filter(is.na(island_id.control) & !is.na(island_id.sample)) %>% .$island_id.sample)), names.common)
-    names.control = c(paste("Control", unique(x %>% dplyr::filter(!is.na(island_id.control) & is.na(island_id.sample)) %>% .$island_id.control)), names.common)
-
-    # Chart
-    p = VennDiagram::venn.diagram(
-      x = list(names.sample, names.control),
-      category.names = c("Sample" , "Control"),
-      lwd = 2,
-      lty = 'blank',
-      fill = RColorBrewer::brewer.pal(3, "Pastel2")[1:2],
-      cat.cex = 2,
-      cat.fontface = "bold",
-      filename = NULL
-    )
-    jpeg("reports/control2sample_venn.jpg", width=400, height=400)
-    grid.draw(p)
-    dev.off()
-  }
 }
