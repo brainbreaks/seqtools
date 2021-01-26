@@ -55,7 +55,7 @@ fit_baseline = function(coverage_df, binstep, llocal) {
   doParallel::registerDoParallel(parallelCluster)
   coverage_dflist.baseline = coverage_df.baseline %>%
     dplyr::group_split()
-  coverage_df.baseline_output = foreach::foreach(z=coverage_dflist.baseline, .combine=rbind) %do% {
+  coverage_df.baseline_output = foreach::foreach(z=coverage_dflist.baseline, .combine=rbind) %dopar% {
     x = matrix(as.numeric(z$coverage_mod), nrow=1)
     colnames(x) = z$start
     bc.irls = baseline::baseline(x, method="medianWindow", hws=z$llocal[1]/z$binstep[1], hwm=z$llocal[1]/z$binstep[1])
@@ -95,7 +95,7 @@ read_junctions = function(path) {
   # Rename Chr14 to Alt289 (Was Alt289 and only PW255 was Alt287)
   #junctions_ann.excluded = "PW121|PW246|PW247|PW248|PW249|JK096|JK097|JK098|JK099|JK100|JK101"
   junctions_ann.excluded = "NO FILTER"
-  junctions_ann = data.frame(junction_file=list.files(path, full.names=T, recursive=T, pattern="*.tlx")) %>%
+  junctions_ann = data.frame(junction_file=Sys.glob(path)) %>%
      dplyr::filter(!grepl(junctions_ann.excluded, junction_file)) %>%
      dplyr::mutate(
        bait_chrom = basename(dirname(junction_file)),
@@ -271,7 +271,7 @@ main = function() {
   #
   # Calculate normalization accross experiment
   #
-  junctions_df = read_junctions("data/breaks_tlx") %>%
+  junctions_df = read_junctions("data/breaks_tlx/*/*.tlx") %>%
     dplyr::inner_join(chromosomes_map_df, by=c("bait_chrom"="chrom_synonym")) %>%
     dplyr::mutate(bait_chrom=unique_chrom) %>%
     dplyr::select(-unique_chrom) %>%
@@ -287,22 +287,18 @@ main = function() {
     dplyr::select(experimental_condition, bait_chrom, scale_factor)
   junctions_df = junctions_df %>%
     dplyr::select(-dplyr::matches("scale_factor")) %>%
-    dplyr::inner_join(scale_factor_df, by=c("experimental_condition", "bait_chrom"))
+    dplyr::inner_join(scale_factor_df, by=c("experimental_condition", "bait_chrom")) %>%
+    dplyr::filter(junction_chrom %in% seqlevels(genome_info)) %>%
+    dplyr::filter(junction_chrom==bait_chrom)
 
-  sample_df = junctions_df %>% dplyr::filter(experimental_condition=="Sample" & junction_chrom==bait_chrom)
+  sample_df = junctions_df %>% dplyr::filter(experimental_condition=="Sample")
   sample_ranges = GenomicRanges::makeGRangesFromDataFrame(sample_df %>% dplyr::mutate(end=junction_end, start=junction_start, seqnames=junction_chrom), keep.extra.columns=T)
-  control_df = junctions_df %>% dplyr::filter(experimental_condition=="Control" & junction_chrom==bait_chrom)
+  control_df = junctions_df %>% dplyr::filter(experimental_condition=="Control")
   control_ranges = GenomicRanges::makeGRangesFromDataFrame(control_df %>% dplyr::mutate(end=junction_end, start=junction_start, seqnames=junction_chrom), keep.extra.columns=T)
   params = call_islands_params(binsize=1e5, binstep=1e4, extend=1e5, llocal=2e6, minqvalue=0.01, maxgap=5e5, minlen=200)
   results = call_islands(sample_ranges, control_ranges, genome_info, params)
 
-
-  # mm9_txdb.gtf = GenomicFeatures::makeTxDbFromGFF('data/mm9/mm9.refGene.gtf.gz', format="gtf")
-
-
-
   if(debug) {
-
     rdc_cols = readr::cols(rdc_cluster=col_character(), rdc_chrom=col_character(), rdc_start=col_double(), rdc_end=col_double(), rdc_group=col_double(), rdc_gene=col_character())
     rdc_df = readr::read_tsv("data/rdc_pnas.tsv", col_types=rdc_cols) %>%
       dplyr::inner_join(chromosomes_map_df, by=c("rdc_chrom"="chrom_synonym")) %>%
@@ -330,8 +326,7 @@ main = function() {
 
     genome_mm9 = mccollect(list(read_mm9_job))[[1]]
     sample_islands_df2offtargets = islands2offtargets_identity(results$islands$sample, targets_df, genome_mm9)
-    pdf(file="reports/duo_baseline_extend1e5_smooth2e6_bin1e5_step1e4_2.pdf", width=15, height=8)
-    pdf(file="test.pdf", width=15, height=8)
+    pdf(file="reports/duo_baseline_extend1e5_smooth2e6_bin1e5_step1e4_3.pdf", width=15, height=8)
     for(chr in paste0("chr", 1:19)) {
       print(chr)
       coverage_df = dplyr::bind_rows(
@@ -366,9 +361,9 @@ main = function() {
   #
   # VENN diagram overlap RDC and sample islands
   #
-  jpeg("reports/rdc2islands_venn.jpg", width=800, height=800)
-  islands_filtered_df = sample_islands$islands %>% dplyr::filter(qvalue_score.control < island_summit_qvalue) %>%  dplyr::mutate(condition="Sample filtered")
-  rdc_ranges = GenomicRanges::makeGRangesFromDataFrame(rdc %>% dplyr::mutate(seqnames=rdc_chrom, start=rdc_start, end=rdc_end), keep.extra.columns=T)
+  jpeg("reports/rdc2islands_venn_2.jpg", width=800, height=800)
+  islands_filtered_df = results$islands$sample %>% dplyr::filter(qvalue_score.control < island_summit_qvalue) %>%  dplyr::mutate(condition="Sample filtered")
+  rdc_ranges = GenomicRanges::makeGRangesFromDataFrame(rdc_df %>% dplyr::mutate(seqnames=rdc_chrom, start=rdc_start, end=rdc_end), keep.extra.columns=T)
   islands_filtered_ranges = GenomicRanges::makeGRangesFromDataFrame(islands_filtered_df %>% dplyr::mutate(seqnames=island_chrom, start=island_start, end=island_end), keep.extra.columns=T)
   venn_ranges(rdc_ranges, islands_filtered_ranges, name1="RDC", name2="island")
   dev.off()
@@ -382,5 +377,70 @@ main = function() {
   sample_islands_ranges = GenomicRanges::makeGRangesFromDataFrame(results$islands$sample, end.field="island_end", start.field="island_start", seqnames.field="island_chrom", keep.extra.columns=T)
   venn_ranges(control_islands_ranges, sample_islands_ranges, name1="Control", name2="Sample")
   dev.off()
+}
 
+
+test_robustness = function() {
+  chromsizes_cols = readr::cols(seqnames=col_character(), seqlengths=col_double())
+  genome_info = with(readr::read_tsv("data/mm9/mm9.chrom.sizes", col_names=names(chromsizes_cols$cols), col_types=chromsizes_cols),
+             GenomeInfoDb::Seqinfo(seqnames, seqlengths, isCircular=rep(F, length(seqnames)), genome=rep("mm9", length(seqnames))))[paste0("chr", c(1:19))]
+  chromosomes_map_df = readr::read_tsv("data/mm9_chromosomes_synonyms.tsv")
+
+  junctions_df = read_junctions("data/breaks_tlx/*/*.tlx") %>%
+    dplyr::inner_join(chromosomes_map_df, by=c("bait_chrom"="chrom_synonym")) %>%
+    dplyr::mutate(bait_chrom=unique_chrom) %>%
+    dplyr::select(-unique_chrom) %>%
+    dplyr::inner_join(chromosomes_map_df, by=c("junction_chrom"="chrom_synonym")) %>%
+    dplyr::mutate(junction_chrom=unique_chrom) %>%
+    dplyr::select(-unique_chrom) %>%
+    dplyr::mutate(junction_name=stringr::str_glue("{bait}_{name}", bait=bait_chrom, name=junction_name))
+  scale_factor_df = junctions_df %>%
+    dplyr::group_by(experimental_condition, bait_chrom) %>%
+    dplyr::summarise(libsize=n()) %>%
+    dplyr::mutate(libsize_median=median(libsize)) %>%
+    dplyr::mutate(scale_factor=libsize_median/libsize) %>%
+    dplyr::select(experimental_condition, bait_chrom, scale_factor)
+  junctions_df.f = junctions_df %>%
+    dplyr::select(-dplyr::matches("scale_factor")) %>%
+    dplyr::inner_join(scale_factor_df, by=c("experimental_condition", "bait_chrom")) %>%
+    dplyr::filter(junction_chrom %in% seqlevels(genome_info))
+    #dplyr::filter(junction_chrom=="chr2" & junction_chrom==bait_chrom)
+    #dplyr::mutate(bait_chrom="chr2")
+  genome_info.f = genome_info[unique(junctions_df.f$junction_chrom)]
+
+  i = 0
+  peaks_robustness = data.frame()
+  for(prop in rev(seq(0.3, 1, 0.05))) {
+    if(prop==1) {
+      rep_all = 1
+    } else {
+      rep_all = 1:10
+    }
+    for(rep in rep_all) {
+      i = i + 1
+      print(paste(i, ":", prop, " / ", rep))
+      sample_df = junctions_df.f %>% dplyr::filter(experimental_condition=="Sample" & junction_chrom==bait_chrom) %>% dplyr::sample_frac(prop)
+      control_df = junctions_df.f %>% dplyr::filter(experimental_condition=="Control" & junction_chrom==bait_chrom) %>% dplyr::sample_frac(prop)
+
+      sample_ranges = GenomicRanges::makeGRangesFromDataFrame(sample_df %>% dplyr::mutate(end=junction_end, start=junction_start, seqnames=junction_chrom), keep.extra.columns=T, seqinfo=genome_info.f)
+      control_ranges = GenomicRanges::makeGRangesFromDataFrame(control_df %>% dplyr::mutate(end=junction_end, start=junction_start, seqnames=junction_chrom), keep.extra.columns=T, seqinfo=genome_info.f)
+      params = call_islands_params(binsize=1e5, binstep=1e4, extend=1e5, llocal=2e6, minqvalue=0.01, maxgap=5e5, minlen=200)
+      results = call_islands(sample_ranges, control_ranges, genome_info.f, params)
+
+      counts = data.frame(robustness_rep=rep, robustness_prop=prop, robustness_count.sample=nrow(sample_df), robustness_count.control=nrow(control_df))
+      peaks_robustness = rbind(peaks_robustness, results$islands$sample %>% tidyr::crossing(counts))
+    }
+  }
+
+  peaks_robustness.sum = peaks_robustness %>%
+    tidyr::crossing(data.frame(robustness_qvalue=2:20)) %>%
+    dplyr::group_by(robustness_prop, robustness_rep, robustness_qvalue) %>%
+    dplyr::summarise(n=sum(island_summit_qvalue>robustness_qvalue)-1)
+
+ pdf("reports/robustness3.pdf", width=16, height=16)
+ ggplot(peaks_robustness.sum) +
+   geom_point(aes(x=robustness_prop, y=n), alpha=0.2) +
+   geom_smooth(aes(x=robustness_prop, y=n)) +
+   facet_wrap(~robustness_qvalue, scales="free_y")
+  dev.off()
 }
