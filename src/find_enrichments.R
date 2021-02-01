@@ -28,7 +28,7 @@ read.breaks = function(dir) {
 
       x = readr::read_tsv(breaks_path, col_names=names(breaks_cols$cols), col_types=breaks_cols) %>%
         dplyr::mutate(break_name_copy=break_name) %>%
-        dplyr::mutate(bait_chrom=chr, break_exp_condition=condition, break_sample=sample, break_end=break_start+1) %>%
+        dplyr::mutate(bait_chrom=chr, experimental_condition=condition, break_sample=sample, break_end=break_start+1) %>%
         tidyr::extract(break_name_copy, "break_replicate", "M01407:320:000000000-ARNUY:1:([^:]).*")
       breaks = rbind(breaks, x)
   }
@@ -42,12 +42,12 @@ control2sample_correlation = function() {
   breaks_cols = cols(break_chrom=col_character(), break_start=col_double(), break_end=col_double(), break_name=col_character(), break_score=col_character(), break_strand=col_character())
   for(breaks_path in list.files("data/breaks", pattern="*.bed", full.names=T)) {
       chr = gsub("(chr)([^_]+).*$", "\\L\\1\\2", basename(breaks_path), perl=T, ignore.case=T)
-      condition = ifelse(grepl("DMSO", breaks_path), "Control", "Sample")
+      experimental_condition = ifelse(grepl("DMSO", breaks_path), "Control", "Sample")
       sample = gsub("\\.bed", "", basename(breaks_path))
 
 
       x = readr::read_tsv(breaks_path, col_names=names(breaks_cols$cols), col_types=breaks_cols) %>%
-        dplyr::mutate(bait_chrom=chr, break_exp_condition=condition, break_sample=sample, break_end=break_start+1)
+        dplyr::mutate(bait_chrom=chr, experimental_condition=condition, break_sample=sample, break_end=break_start+1)
       breaks = rbind(breaks, x)
   }
   breaks = breaks %>% dplyr::mutate(break_id=1:n())
@@ -75,16 +75,16 @@ control2sample_correlation = function() {
     dplyr::group_by(bait_chrom, break_chrom) %>%
     dplyr::mutate(break_pos_max=max(c(break_start, break_end))) %>%
     dplyr::ungroup() %>%
-    dplyr::group_by(bait_chrom, break_exp_condition, break_chrom) %>%
+    dplyr::group_by(bait_chrom, experimental_condition, break_chrom) %>%
     dplyr::do((function(z){
-      #z = breaks.densities %>% dplyr::filter(break_exp_condition=="Sample" & bait_chrom=="chr13" & density_chrom=="chr13")
+      #z = breaks.densities %>% dplyr::filter(experimental_condition=="Sample" & bait_chrom=="chr13" & density_chrom=="chr13")
       zz<<-z
       z = z %>% dplyr::mutate(chr=break_chrom, start=break_start, end=break_end)
       d = breaksDensity(z, to=z$break_pos_max[1], width=2e5) %>%
-        dplyr::mutate(bait_chrom=z$bait_chrom[1], break_exp_condition=z$break_exp_condition[1])
+        dplyr::mutate(bait_chrom=z$bait_chrom[1], experimental_condition=z$experimental_condition[1])
       d
     })(.)) %>%
-    reshape2::dcast(bait_chrom + density_chrom + density_start ~ break_exp_condition, value.var="density_value") %>%
+    reshape2::dcast(bait_chrom + density_chrom + density_start ~ experimental_condition, value.var="density_value") %>%
     dplyr::filter(Control>0 | Sample>0)
   breaks.densities.R = breaks.densities %>%
     dplyr::group_by(density_chrom) %>%
@@ -157,12 +157,12 @@ find_clusters = function() {
     })(.))
 
   breaks1 %>%
-    dplyr::group_by(bait_chrom, break_exp_condition) %>%
+    dplyr::group_by(bait_chrom, experimental_condition) %>%
     dplyr::summarise(n=n(), n_bait=sum(bait_overlap), n_nonbait=sum(!bait_overlap)) %>%
     data.frame()
 
   breaks1 %>%
-    dplyr::group_by(break_chrom, bait_chrom, break_exp_condition) %>%
+    dplyr::group_by(break_chrom, bait_chrom, experimental_condition) %>%
     dplyr::summarise(n_bait=sum(bait_overlap), n_nonbait=sum(!bait_overlap))  %>%
     reshape2::melt(measure.vars=c("n_bait", "n_nonbait")) %>%
     ggplot() +
@@ -191,7 +191,7 @@ find_clusters = function() {
               zf.clusters.control = GenomicRanges::makeGRangesFromDataFrame(zf, keep.extra.columns=T)
               rbind(zf.clusters.control, zf.clusters.sample)
 
-  table(breaks$break_exp_condition , breaks$break_replicate)
+  table(breaks$experimental_condition , breaks$break_replicate)
 }
 
 
@@ -251,18 +251,18 @@ for(breaks_bed in list.files("data/breaks", pattern="*_APH_no10kb_Merge.bed", fu
     readr::write_tsv(breaks_filtered, file=breaks_filtered_bed, col_names=F)
 
     dplyr::bind_rows(
-      breaks_control_filtered %>% dplyr::mutate(break_exp_condition="Control"),
-      breaks_filtered %>% dplyr::mutate(break_exp_condition="Sample")) %>%
+      breaks_control_filtered %>% dplyr::mutate(experimental_condition="Control"),
+      breaks_filtered %>% dplyr::mutate(experimental_condition="Sample")) %>%
         dplyr::group_by(chr) %>%
         dplyr::summarise(
-          control=sum(break_exp_condition=="Control"),
-          control_filtered=sum(break_exp_condition=="Control" & !(start >= x.offtargets$offtarget_start-3e6 & end<=x.offtargets$offtarget_start+3e6 & x.offtargets$offtarget_chrom==chr)),
-          sample=sum(break_exp_condition=="Sample"),
-          sample_filtered=sum(break_exp_condition=="Sample" & !(start >= x.offtargets$offtarget_start-3e6 & end<=x.offtargets$offtarget_start+3e6 & x.offtargets$offtarget_chrom==chr))) %>%
+          control=sum(experimental_condition=="Control"),
+          control_filtered=sum(experimental_condition=="Control" & !(start >= x.offtargets$offtarget_start-3e6 & end<=x.offtargets$offtarget_start+3e6 & x.offtargets$offtarget_chrom==chr)),
+          sample=sum(experimental_condition=="Sample"),
+          sample_filtered=sum(experimental_condition=="Sample" & !(start >= x.offtargets$offtarget_start-3e6 & end<=x.offtargets$offtarget_start+3e6 & x.offtargets$offtarget_chrom==chr))) %>%
       View()
 
   x = readr::read_tsv(breaks_bed, col_names=names(bed_cols$cols), col_types=bed_cols) %>%
-    dplyr::mutate(break_exp_condition="Sample") %>%
+    dplyr::mutate(experimental_condition="Sample") %>%
     tidyr::extract(name, "replicate", "M01407:320:000000000-ARNUY:1:([^:]).*")
 
   table(x$replicate)
@@ -271,15 +271,15 @@ for(breaks_bed in list.files("data/breaks", pattern="*_APH_no10kb_Merge.bed", fu
 
 table(stringr::str_extract_all("M01407:320:000000000-ARNUY:1:", x$name))
     breaks = dplyr::bind_rows(
-      readr::read_tsv(breaks_bed, col_names=names(bed_cols$cols), col_types=bed_cols) %>% dplyr::mutate(break_exp_condition="Sample"),
-      readr::read_tsv(breaks_control_bed, col_names=names(bed_cols$cols), col_types=bed_cols) %>% dplyr::mutate(break_exp_condition="Control")) %>%
+      readr::read_tsv(breaks_bed, col_names=names(bed_cols$cols), col_types=bed_cols) %>% dplyr::mutate(experimental_condition="Sample"),
+      readr::read_tsv(breaks_control_bed, col_names=names(bed_cols$cols), col_types=bed_cols) %>% dplyr::mutate(experimental_condition="Control")) %>%
       dplyr::mutate(end=start+1)
 
     breaks$name
 
 
     breaks_clusters = breaks %>%
-        dplyr::group_by(break_exp_condition, chr) %>%
+        dplyr::group_by(experimental_condition, chr) %>%
         dplyr::do((function(z){
             if(nrow(z) < 20) return(data.frame())
 
@@ -298,7 +298,7 @@ table(stringr::str_extract_all("M01407:320:000000000-ARNUY:1:", x$name))
             #res.optics = dbscan::optics(z.dist, minPts=20, eps=1e8)
 
             z.max = max(z = breaks %>% dplyr::filter(chr=="chr6") %>% .$start)
-            z = breaks %>% dplyr::filter(chr=="chr6" & break_exp_condition=="Control")
+            z = breaks %>% dplyr::filter(chr=="chr6" & experimental_condition=="Control")
             res.optics = dbscan::optics(matrix(z$start), minPts=10, eps=1e8)
             res.dbscan = dbscan::extractDBSCAN(res.optics, eps_cl=1e5)
 
@@ -359,7 +359,7 @@ table(stringr::str_extract_all("M01407:320:000000000-ARNUY:1:", x$name))
 
             z.clusters_reduced = z.clusters_reduced %>%
               dplyr::inner_join(z.clusters_reduced_sizes, by="reduced_cluster_id") %>%
-              dplyr::mutate(break_exp_condition=z$break_exp_condition[1], chr=z$chr[1], cluster_size=optics_end-optics_start+1) %>%
+              dplyr::mutate(experimental_condition=z$experimental_condition[1], chr=z$chr[1], cluster_size=optics_end-optics_start+1) %>%
               dplyr::select(-revmap)
 
           axisTrack = GenomeAxisTrack()

@@ -78,7 +78,7 @@ ggplot_karyoplot = function(coverage_df=NULL, baseline_df=NULL, islands_df=NULL,
     p = p + geom_rect(aes(xmin=start, xmax=end, fill=experimental_condition, alpha=coverage, ymin=-(islands_offset+1+experimental_condition_number)*max_coverage*0.05, ymax=-(islands_offset+experimental_condition_number)*max_coverage*0.05), data=coverage_df)
   }
   if(!is.null(islands_df) & nrow(islands_df)>0) {
-    if("score" %in% colnames(islands_df)) {
+    if(!("score" %in% colnames(islands_df))) {
       islands_df$score = max(coverage_df$coverage)
     }
     islands_df$score = ifelse(is.na(islands_df$score), max(coverage_df$coverage), islands_df$score)
