@@ -13,7 +13,7 @@ library(future)
 source("src/utilities.R")
 source("src/visualization.R")
 
-macs_call_islands = function(signal_df, background_df, matching_tiles=T, minqvalue, maxgap, minlen) {
+macs_call_islands = function(signal_df, background_df, params, matching_tiles=T) {
   qvalue_path = "data/macs2/bdgcmp_qvalue.bdg"
   peaks_path = "data/macs2/bdgcmp_peaks.bed"
 
@@ -43,7 +43,7 @@ macs_call_islands = function(signal_df, background_df, matching_tiles=T, minqval
   qvalues_df = qvalues_df %>% dplyr::mutate(qvalue_id=1:n())
 
   system(stringr::str_glue("macs2 bdgpeakcall -i {qvalue} -c {cutoff} --min-length {format(island_min_length, scientific=F)} --max-gap {format(island_max_gap, scientific=F)} -o {output}",
-       qvalue=qvalue_path, output=peaks_path, cutoff=minqvalue, island_max_gap=maxgap, island_min_length=minlen))
+       qvalue=qvalue_path, output=peaks_path, cutoff=-log10(params$minqvalue), island_max_gap=params$maxgap, island_min_length=params$minlen))
 
   # Read results file
   peaks_cols = cols(
@@ -109,30 +109,41 @@ peaks2offtargets_identity = function(islands_df, offtargets_df, genome_mm9) {
   islands_df
 }
 
-fit_baseline = function(coverage_df, binstep, llocal) {
-  coverage_df.baseline = coverage_df %>%
-    dplyr::mutate(binstep=binstep, llocal=llocal) %>%
-    dplyr::mutate(condition="Control") %>%
-    dplyr::arrange(seqnames, start) %>%
+fit_baseline = function(coverage_df, params) {
+  coverage_df.baseline_1 = coverage_df %>%
+    dplyr::mutate(binstep=params$binstep, llocal=params$llocal) %>%
     dplyr::group_by(seqnames) %>%
-    #dplyr::mutate(coverage_mod=coverage)
-    dplyr::mutate(is_q2=coverage>quantile(coverage, 0.2, na.rm=T), is_q8=coverage<quantile(coverage, 0.8, na.rm=T), is_inner_quantile=is_q2 & is_q8) %>%
-    dplyr::mutate(coverage_median=median(coverage[is_inner_quantile], na.rm=T), coverage_sd=sd(coverage[is_inner_quantile], na.rm=T)) %>%
-    dplyr::mutate(coverage_min=coverage_median-2*coverage_sd) %>%
-    dplyr::mutate(coverage_mod=ifelse(coverage<coverage_min, NA_real_, coverage)) %>%
-    dplyr::mutate(is_filled=is.na(coverage_mod), coverage_mod=zoo::na.fill(coverage_mod, "extend"))
+    dplyr::filter(max(coverage)>0) %>%
+    dplyr::ungroup() %>%
+    dplyr::arrange(seqnames, start)
 
+  coverage_df.baseline_2 = coverage_df.baseline_1 %>%
+    dplyr::group_by(seqnames) %>%
+    dplyr::summarize(q1=quantile(coverage, params$baseline_quantiles[1], na.rm=T), q2=quantile(coverage, params$baseline_quantiles[2], na.rm=T), q_str=stringr::str_glue("{chr}: Specified quantiles/coverage => ({p1}/{q1}, {p2}/{q2}) covers {prct}% chromosome", chr=seqnames[1], p1=params$baseline_quantiles[1], p2=params$baseline_quantiles[2], q1=q1, q2=q2, prct=round(mean(dplyr::between(coverage, q1, q2))*100)), .groups="keep")
+  writeLines(coverage_df.baseline_2$q_str)
+
+  coverage_df.baseline = coverage_df.baseline_1 %>%
+    dplyr::inner_join(coverage_df.baseline_2 %>% dplyr::select(seqnames, q1, q2), by="seqnames") %>%
+    dplyr::mutate(is_inner_quantile=dplyr::between(coverage, q1, q2)) %>%
+    dplyr::group_by(seqnames) %>%
+    dplyr::mutate(coverage_median=mean(coverage[is_inner_quantile], na.rm=T), coverage_sd=sd(coverage[is_inner_quantile], na.rm=T)) %>%
+    dplyr::mutate(coverage_min=pmax(coverage_median-2*coverage_sd, 0)) %>%
+    dplyr::mutate(coverage_mod=ifelse(coverage<coverage_min, NA_real_, coverage)) %>%
+    dplyr::mutate(coverage_mod=zoo::na.fill(coverage_mod, "extend"))
 
   parallelCluster = parallel::makeCluster(19, type="PSOCK", methods=FALSE)
   doParallel::registerDoParallel(parallelCluster)
-  coverage_dflist.baseline = coverage_df.baseline %>%
-    dplyr::group_split()
+  coverage_dflist.baseline = coverage_df.baseline %>% dplyr::group_by(seqnames) %>% dplyr::group_split()
   coverage_df.baseline_output = foreach::foreach(z=coverage_dflist.baseline, .combine=rbind) %dopar% {
+    library(dplyr)
     x = matrix(as.numeric(z$coverage_mod), nrow=1)
     colnames(x) = z$start
     bc.irls = baseline::baseline(x, method="medianWindow", hws=z$llocal[1]/z$binstep[1], hwm=z$llocal[1]/z$binstep[1])
     z.coverage_smooth = as.numeric(bc.irls@baseline)
-    cbind(z[c("seqnames", "start", "end", "coverage", "coverage_mod", "is_filled")], coverage_smooth=z.coverage_smooth)
+    cbind(z[c("seqnames", "start", "end", "coverage", "coverage_mod")], coverage_smooth=z.coverage_smooth)
+      # dplyr::mutate(q1=quantile(coverage_smooth, params$baseline_quantiles[1], na.rm=T), q2=quantile(coverage_smooth, params$baseline_quantiles[2], na.rm=T))
+      # dplyr::mutate(is_inner_quantile=dplyr::between(coverage, q1, q2)) %>%
+      # dplyr::mutate(coverage_smooth_median=median(coverage[is_inner_quantile], na.rm=T))
   }
   stopCluster(parallelCluster)
 
@@ -144,6 +155,14 @@ fit_baseline = function(coverage_df, binstep, llocal) {
       coverage_th01=qgamma(0.01, coverage_smooth, 1, lower.tail=F)) %>%
     dplyr::ungroup() %>%
     dplyr::mutate(qvalue=qvalue::qvalue(pvalue)$qvalues)
+
+
+  # ggplot(coverage_df.baseline_output) +
+  #   geom_line(aes(x=start, y=coverage_mod)) +
+  #   geom_line(aes(x=start, y=coverage_smooth)) +
+  #   geom_line(aes(x=start, y=log10(qvalue), color="red")) +
+  #   geom_hline(yintercept=-2) +
+  #   facet_wrap(~seqnames)
 
 
   return(coverage_df.baseline_output)
@@ -204,20 +223,18 @@ read_junctions = function(path) {
 }
 
 
-calculate_coverage2 = function(ranges, genome_info, params) {
+calculate_coverage2 = function(ranges, params) {
   if(is.null(ranges$score)) {
     ranges$score = 1
     writeLines("Data has no score column. Using '1' as a scale factor")
   }
 
-  genome_original_tiles = unlist(GenomicRanges::tileGenome(genome_info, tilewidth=params$binstep))
+  genome_original_tiles = unlist(GenomicRanges::tileGenome(GenomeInfoDb::seqinfo(ranges), tilewidth=params$binstep))
   genome_original_tiles$original_start = GenomicRanges::start(genome_original_tiles)
   genome_original_tiles$original_end = GenomicRanges::end(genome_original_tiles)
-  genome_tiles = GenomicRanges::trim(GenomicRanges::resize(genome_original_tiles, params$binsize, fix="center"))
+  genome_tiles = suppressWarnings(GenomicRanges::trim(GenomicRanges::resize(genome_original_tiles, params$binsize, fix="center")))
 
-  GenomeInfoDb::seqinfo(ranges) = genome_info
-  ranges.extended = GenomicRanges::trim(GenomicRanges::resize(ranges, width=params$extend, fix="center"))
-
+  ranges.extended = suppressWarnings(GenomicRanges::trim(GenomicRanges::resize(ranges, width=params$extend, fix="center")))
 
   hits = as(findOverlaps(genome_tiles, ranges.extended), "List")
   coverage_df = as.data.frame(genome_tiles) %>%
@@ -234,11 +251,11 @@ calculate_coverage2 = function(ranges, genome_info, params) {
 }
 
 
-call_islands_params = function(binsize=1e5, binstep=1e4, extend=1e5, llocal=2e6, minqvalue=0.01, maxgap=5e5, minlen=200) {
-  list(binsize=binsize, binstep=binstep, extend=extend, llocal=llocal, minqvalue=-log10(minqvalue), maxgap=maxgap, minlen=minlen)
+call_islands_params = function(binsize=1e5, binstep=1e4, extend=1e5, llocal=2e6, minqvalue=0.01, maxgap=5e5, minlen=200, baseline_quantiles=c(0, 0.8)) {
+  list(binsize=binsize, binstep=binstep, extend=extend, llocal=llocal, minqvalue=minqvalue, maxgap=maxgap, minlen=minlen, baseline_quantiles=baseline_quantiles)
 }
 
-call_islands = function(sample_ranges, control_ranges, genome_info, params=call_islands_params(), debug=F) {
+call_islands = function(sample_ranges, control_ranges, params=call_islands_params(), debug=F) {
   sample_bed_path = "data/breakensembl/Sample.bed"
   control_bed_path = "data/breakensembl/Control.bed"
 
@@ -264,12 +281,11 @@ call_islands = function(sample_ranges, control_ranges, genome_info, params=call_
     writeLines("Sample data has no score column. Using '1' as a scale factor")
   }
 
-
   #
   # Caclulate sample baseline
   #
-  sample_tiles_df.coverage = calculate_coverage2(sample_ranges, genome_info, params=params)
-  sample_df.baseline = fit_baseline(sample_tiles_df.coverage, binstep=params$binstep, llocal=params$llocal)
+  sample_tiles_df.coverage = calculate_coverage2(ranges=sample_ranges, params=params)
+  sample_df.baseline = fit_baseline(coverage_df=sample_tiles_df.coverage, params=params)
 
   #
   # Caclulate control baseline
@@ -277,59 +293,93 @@ call_islands = function(sample_ranges, control_ranges, genome_info, params=call_
   if(is.null(control_ranges)) {
     control_df.baseline = sample_df.baseline
   } else {
-    control_tiles_df.coverage = calculate_coverage2(control_ranges, genome_info, params=params)
-    control_df.baseline = fit_baseline(control_tiles_df.coverage, binstep=params$binstep, llocal=params$llocal)
+    control_tiles_df.coverage = calculate_coverage2(ranges=control_ranges, params=params)
+    control_df.baseline = fit_baseline(coverage_df=control_tiles_df.coverage, params=params)
   }
+
+  #
+  # coverage_df.baseline_2 = coverage_df.baseline_1 %>%
+  #   dplyr::group_by(seqnames) %>%
+  #   dplyr::summarize(q1=quantile(coverage, params$baseline_quantiles[1], na.rm=T), q2=quantile(coverage, params$baseline_quantiles[2], na.rm=T), q_str=stringr::str_glue("{chr}: Specified quantiles/coverage => ({p1}/{q1}, {p2}/{q2}) covers {prct}% chromosome", chr=seqnames[1], p1=mean_quantiles[1], p2=mean_quantiles[2], q1=q1, q2=q2, prct=round(mean(dplyr::between(coverage, q1, q2))*100)), .groups="keep") %>%
+  #   dplyr::mutate()
+  # writeLines(coverage_df.baseline_2$q_str)
+  #
+  # coverage_df.baseline = coverage_df.baseline_1 %>%
+  #   dplyr::inner_join(coverage_df.baseline_2 %>% dplyr::select(seqnames, q1, q2), by="seqnames") %>%
+  #   dplyr::mutate(is_inner_quantile=dplyr::between(coverage, q1, q2)) %>%
+  #   dplyr::group_by(seqnames) %>%
+  #   dplyr::mutate(coverage_median=median(coverage[is_inner_quantile], na.rm=T), coverage_sd=sd(coverage[is_inner_quantile], na.rm=T)) %>%
+
+  baseline_adjusted_df_1 = control_df.baseline %>%
+    dplyr::select(seqnames, start, end, coverage.control=coverage, coverage_smooth.control_vs_control=coverage_smooth) %>%
+    dplyr::inner_join(sample_df.baseline %>% dplyr::select(seqnames, start, end, coverage.sample=coverage, coverage_smooth.sample_vs_sample=coverage_smooth), by=c("seqnames", "start", "end"))
+
+  baseline_adjusted_scale_factor = baseline_adjusted_df_1 %>%
+    dplyr::group_by(seqnames) %>%
+    dplyr::mutate(
+      qc_q1=quantile(coverage.control, params$baseline_quantiles[1], na.rm=T), qc_q2=quantile(coverage.control, params$baseline_quantiles[2], na.rm=T),
+      qs_q1=quantile(coverage.sample, params$baseline_quantiles[1], na.rm=T), qs_q2=quantile(coverage.sample, params$baseline_quantiles[2], na.rm=T),
+      qc=dplyr::between(coverage.control, qc_q1, qc_q2),
+      qs=dplyr::between(coverage.sample, qs_q1, qs_q2)) %>%
+    dplyr::summarize(
+      scale_factor.control=mean(coverage.sample[qs])/mean(coverage.control[qc]),
+      q_str=stringr::str_glue("{chr} | control scale factor = {scale_factor} | baseline percentiles = ({p1}, {p2}) | [control] baseline quantiles = ({c_q1}, {c_q2}) covers {c_prct}% chromosome (mean: {c_mean}) | [sample] baseline quantiles => ({s_q1}, {s_q2}) covers {s_prct}% chromosome (mean: {s_mean})",
+            chr=seqnames[1], p1=params$baseline_quantiles[1], p2=params$baseline_quantiles[2], scale_factor=round(scale_factor.control, 2),
+            c_q1=qc_q1[1], c_q2=qc_q2[2], c_prct=round(mean(qc)*100), c_mean=round(mean(coverage.control[qc]), 2),
+            s_q1=qs_q1[1], s_q2=qs_q2[2], s_prct=round(mean(qs)*100), s_mean=round(mean(coverage.sample[qs]), 2)
+      ), .groups="keep")
+  writeLines(baseline_adjusted_scale_factor$q_str)
 
   #
   # Adjust control baseline to sample library
   #
-  control_df.baseline_adjusted = control_df.baseline %>%
-    dplyr::select(seqnames, start, end, coverage_smooth.control=coverage_smooth, is_filled.control=is_filled) %>%
-    dplyr::inner_join(sample_df.baseline %>% dplyr::select(seqnames, start, end, coverage, coverage_smooth.sample=coverage_smooth, is_filled.sample=is_filled), by=c("seqnames", "start", "end")) %>%
+  baseline_adjusted_df = baseline_adjusted_df_1 %>%
+    dplyr::inner_join(baseline_adjusted_scale_factor %>% dplyr::select(seqnames, scale_factor.control), by="seqnames") %>%
     dplyr::group_by(seqnames) %>%
     dplyr::mutate(
-      qc=!is_filled.control & coverage_smooth.control<quantile(coverage_smooth.control[!is_filled.control], 0.5),
-      qs=!is_filled.sample & coverage_smooth.sample<quantile(coverage_smooth.sample[!is_filled.sample], 0.5),
-      f=mean((coverage_smooth.sample/coverage_smooth.control)[qc&qs]),
-      coverage_smooth=f*coverage_smooth.control) %>%
+      coverage.sample_scaled=coverage.sample*scale_factor.control,
+      coverage_smooth.sample_vs_control=coverage_smooth.control_vs_control*scale_factor.control,
+      coverage_smooth.sample_vs_max=pmax(coverage_smooth.sample_vs_control, coverage_smooth.sample_vs_sample),
+    ) %>%
     dplyr::rowwise() %>%
     dplyr::mutate(
-      pvalue=pgamma(coverage, shape=coverage_smooth, rate=1, lower.tail=F),
-      coverage_th01=qgamma(0.01, coverage_smooth, 1, lower.tail=F)) %>%
+      pvalue.control_vs_control=pgamma(coverage.control, shape=coverage_smooth.control_vs_control, rate=1, lower.tail=F),
+      coverage_th01.control_vs_control=qgamma(params$minqvalue, coverage_smooth.control_vs_control, 1, lower.tail=F),
+      pvalue.sample_vs_sample=pgamma(coverage.sample, shape=coverage_smooth.sample_vs_sample, rate=1, lower.tail=F),
+      coverage_th01.sample_vs_sample=qgamma(params$minqvalue, coverage_smooth.sample_vs_sample, 1, lower.tail=F),
+      pvalue.sample_vs_control=pgamma(coverage.sample, shape=coverage_smooth.sample_vs_control, rate=1, lower.tail=F),
+      coverage_th01.sample_vs_control=qgamma(params$minqvalue, coverage_smooth.sample_vs_sample, 1, lower.tail=F),
+      pvalue.sample_vs_max=pgamma(coverage.sample, shape=coverage_smooth.sample_vs_max, rate=1, lower.tail=F),
+      coverage_th01.sample_vs_max=qgamma(params$minqvalue, coverage_smooth.sample_vs_sample, 1, lower.tail=F)) %>%
     dplyr::ungroup() %>%
-    dplyr::mutate(qvalue=qvalue::qvalue(pvalue)$qvalues) %>%
-    dplyr::select(seqnames, start, end, coverage, coverage_smooth, pvalue, qvalue, coverage_th01)
-
-  #
-  # Max Control/Sample baseline
-  #
-  mixed_df.baseline = control_df.baseline_adjusted %>%
-    dplyr::select(seqnames, start, end, coverage_smooth.control=coverage_smooth) %>%
-    dplyr::inner_join(sample_df.baseline %>% dplyr::select(seqnames, start, end, coverage, coverage_smooth.sample=coverage_smooth), by=c("seqnames", "start", "end")) %>%
-    dplyr::mutate(coverage_smooth=pmax(coverage_smooth.sample, coverage_smooth.control)) %>%
-    dplyr::select(seqnames, start, end, coverage, coverage_smooth) %>%
-    dplyr::rowwise() %>%
     dplyr::mutate(
-      pvalue=pgamma(coverage, shape=coverage_smooth, rate=1, lower.tail=F),
-      coverage_th01=qgamma(0.01, coverage_smooth, 1, lower.tail=F)) %>%
-    dplyr::ungroup() %>%
-    dplyr::mutate(qvalue=qvalue::qvalue(pvalue)$qvalues) %>%
-    dplyr::select(seqnames, start, end, coverage, coverage_smooth, pvalue, qvalue, coverage_th01)
+      qvalue.control_vs_control=qvalue::qvalue(pvalue.control_vs_control)$qvalues,
+      qvalue.sample_vs_sample=qvalue::qvalue(pvalue.sample_vs_sample)$qvalues,
+      qvalue.sample_vs_control=qvalue::qvalue(pvalue.sample_vs_control)$qvalues,
+      qvalue.sample_vs_max=qvalue::qvalue(pvalue.sample_vs_max)$qvalues) %>%
+    dplyr::select(seqnames, start, end, dplyr::matches("\\.(control|sample)"))
 
 
   sample_islands = macs_call_islands(
-    signal_df=sample_tiles_df.coverage %>% dplyr::select(seqnames, start, end, coverage),
-    background_df=mixed_df.baseline %>% dplyr::select(seqnames, start, end, coverage=coverage_smooth),
-    minqvalue=params$minqvalue, maxgap=params$maxgap, minlen=params$minlen)
+    signal_df=baseline_adjusted_df %>% dplyr::mutate(coverage=coverage.sample),
+    background_df=baseline_adjusted_df %>% dplyr::mutate(coverage=coverage_smooth.sample_vs_max),
+    params=params)
 
   control_islands = macs_call_islands(
-    signal_df=control_tiles_df.coverage %>% dplyr::select(seqnames, start, end, coverage),
-    background_df=control_df.baseline %>% dplyr::select(seqnames, start, end, coverage=coverage_smooth),
-    minqvalue=params$minqvalue, maxgap=params$maxgap, minlen=params$minlen)
+    signal_df=baseline_adjusted_df %>% dplyr::mutate(coverage=coverage.control),
+    background_df=baseline_adjusted_df %>% dplyr::mutate(coverage=coverage_smooth.control_vs_control),
+    params=params)
+
+  # ggplot(baseline_adjusted_df) +
+  #   geom_line(aes(x=start, y=coverage.sample, color="sample")) +
+  #   geom_line(aes(x=start, y=coverage_smooth.sample_vs_max, color="max")) +
+  #   coord_cartesian(ylim=c(0, 100))
+  #
+  # ggplot(sample_islands$qvalues) +
+  #   geom_line(aes(x=qvalue_start, y=qvalue_score))
+
 
   sample_islands_ranges = GenomicRanges::makeGRangesFromDataFrame(sample_islands$islands %>% dplyr::select(seqnames=island_chrom, start=island_start, end=island_end, island_id.sample=island_id), keep.extra.columns=T)
-  control_islands_ranges = GenomicRanges::makeGRangesFromDataFrame(control_islands$islands %>% dplyr::select(seqnames=island_chrom, start=island_start, end=island_end, island_id.control=island_id), keep.extra.columns=T)
   control_qvalues_ranges = GenomicRanges::makeGRangesFromDataFrame(control_islands$qvalues %>% dplyr::select(seqnames=qvalue_chrom, start=qvalue_start, end=qvalue_end, island_summit_qvalue.control=qvalue_score), keep.extra.columns=T)
   sample2control_islands.map = as.data.frame(IRanges::mergeByOverlaps(sample_islands_ranges, control_qvalues_ranges)) %>% dplyr::select(island_id.sample, island_summit_qvalue.control)
   sample_islands$islands = sample_islands$islands %>%
@@ -345,7 +395,7 @@ call_islands = function(sample_ranges, control_ranges, genome_info, params=call_
 
   list(
     islands=list(sample=sample_islands$islands, control=control_islands$islands),
-    baseline=list(sample=sample_df.baseline, control=control_df.baseline_adjusted, mixed=mixed_df.baseline),
-    coverage=list(sample=sample_tiles_df.coverage, control=control_tiles_df.coverage)
+    coverage=baseline_adjusted_df
   )
 }
+

@@ -86,8 +86,10 @@ ggplot_karyoplot = function(coverage_df=NULL, baseline_df=NULL, islands_df=NULL,
     islands_df$experimental_condition_number = as.numeric(as.factor(as.character(islands_df$experimental_condition)))
     p = p + geom_rect(aes(xmin=island_start, xmax=island_end, fill=experimental_condition, ymin=-(0+experimental_condition_number)*max_coverage*0.05, ymax=-(1+experimental_condition_number)*max_coverage*0.05, alpha=score), data=islands_df)
     if("island_summit_abs" %in% colnames(islands_df)) {
-      # islands_df$island_summit_abs_display = ifelse(islands_df$island_summit_abs>=1e3, with(islands_df, paste0(floor(island_summit_abs/10^log10(island_summit_abs)), "e", floor(log10(island_summit_abs)))), as.character(round(islands_df$island_summit_abs)))
-      islands_df$island_summit_abs_display = round(islands_df$island_summit_qvalue)
+      islands_df$island_summit_abs_display = islands_df$island_summit_qvalue
+      if(is.numeric(islands_df$island_summit_qvalue)) {
+        islands_df$island_summit_abs_display = round(islands_df$island_summit_abs_display)
+      }
       p = p + ggrepel::geom_text_repel(aes(x=island_start, y=-(0.5+experimental_condition_number)*max_coverage*0.05, label=island_summit_abs_display), color="#333333", data=islands_df)
     }
   }
