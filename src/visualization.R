@@ -33,9 +33,15 @@ venn_ranges = function(r1, r2, name1, name2) {
   grid::grid.draw(p)
 }
 
-scale_breaks = function(x) {
-    breaks = seq(0, max(x), 1e7)
+scale_1mb = function(x) {
+    breaks = seq(0, max(x), 1e6)
     names(breaks) = paste0(breaks/1e6, "Mb")
+    breaks
+}
+
+scale_100kb = function(x) {
+    breaks = seq(0, max(x), 1e6)
+    names(breaks) = paste0(breaks/1e6, ",000Kb")
     breaks
 }
 

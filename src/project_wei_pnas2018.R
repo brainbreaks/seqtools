@@ -40,11 +40,13 @@ main = function() {
     dplyr::filter(junction_chrom==bait_chrom)
 
   sample_df = junctions_df %>% dplyr::filter(experimental_condition=="Sample")
-  sample_ranges = GenomicRanges::makeGRangesFromDataFrame(sample_df %>% dplyr::mutate(end=junction_end, start=junction_start, seqnames=junction_chrom), keep.extra.columns=T)
+  sample_ranges = GenomicRanges::makeGRangesFromDataFrame(sample_df %>% dplyr::mutate(end=junction_end, start=junction_start, seqnames=junction_chrom), seqinfo=genome_info, keep.extra.columns=T)
   control_df = junctions_df %>% dplyr::filter(experimental_condition=="Control")
-  control_ranges = GenomicRanges::makeGRangesFromDataFrame(control_df %>% dplyr::mutate(end=junction_end, start=junction_start, seqnames=junction_chrom), keep.extra.columns=T)
+  control_ranges = GenomicRanges::makeGRangesFromDataFrame(control_df %>% dplyr::mutate(end=junction_end, start=junction_start, seqnames=junction_chrom), seqinfo=genome_info,  keep.extra.columns=T)
   params = call_islands_params(binsize=1e5, binstep=1e4, extend=1e5, llocal=2e6, minqvalue=0.01, maxgap=5e5, minlen=200)
-  results = call_islands(sample_ranges, control_ranges, genome_info, params)
+  results = call_islands(sample_ranges, control_ranges, params, debug=F)
+
+
 
   if(debug) {
     rdc_cols = readr::cols(rdc_cluster=col_character(), rdc_chrom=col_character(), rdc_start=col_double(), rdc_end=col_double(), rdc_group=col_double(), rdc_gene=col_character())
@@ -77,6 +79,16 @@ main = function() {
     pdf(file="reports/duo_baseline_extend1e5_smooth2e6_bin1e5_step1e4_3.pdf", width=15, height=8)
     for(chr in paste0("chr", 1:19)) {
       print(chr)
+
+
+        geom_line(aes(x=start, y=coverage*coverage_adj, color=experimental_condition), data=coverage_df %>% dplyr::filter(grepl("parental|allelic", experimental_condition)), size=0.3) +
+        scale_fill_manual(values=manual_colors) +
+        scale_color_manual(values=manual_colors) +
+        theme_classic(base_size=16) +
+        scale_x_continuous(breaks=scale_breaks) +
+        guides(fill=guide_legend(title="Treatment"), color=guide_legend(title="")) +
+        labs(x="", y="Coverage (adjusted)")
+
       coverage_df = dplyr::bind_rows(
         results$coverage$control %>% dplyr::mutate(experimental_condition="Control"),
         results$coverage$sample %>% dplyr::mutate(experimental_condition="Sample")) %>%
@@ -89,7 +101,7 @@ main = function() {
       islands_df = dplyr::bind_rows(
         results$islands$control %>% dplyr::mutate(experimental_condition="Control"),
         results$islands$sample %>% dplyr::mutate(experimental_condition="Sample"),
-        sample_islands_df2offtargets %>% dplyr::mutate(seqnames=island_chrom, island_summit_qvalue=bait_alignment_identity, score=(bait_alignment_identity-min(bait_alignment_identity))/(100-max(bait_alignment_identity))*max(coverage_df$coverage), condition="Offtarget"),
+        # sample_islands_df2offtargets %>% dplyr::mutate(seqnames=island_chrom, island_summit_qvalue=bait_alignment_identity, score=(bait_alignment_identity-min(bait_alignment_identity))/(100-max(bait_alignment_identity))*max(coverage_df$coverage), condition="Offtarget"),
         rdc_df %>% dplyr::mutate(experimental_condition="RDC", island_start=rdc_start, island_end=rdc_end, island_chrom=rdc_chrom)) %>%
          dplyr::mutate(seqnames=island_chrom, score=max(results$coverage$sample$coverage)) %>%
          dplyr::filter(seqnames %in% chr)
